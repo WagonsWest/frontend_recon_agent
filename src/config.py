@@ -65,6 +65,11 @@ class ExplorationConfig(BaseModel):
         ".ant-menu-item",                   # Ant Design (no child a)
         "nav a[href]", ".sidebar a[href]", ".side-nav a[href]",
     ])
+    # Selectors for collapsed sub-menus that need expanding before nav items are visible
+    submenu_expand_selectors: list[str] = Field(default_factory=lambda: [
+        ".el-sub-menu:not(.is-opened) > .el-sub-menu__title",
+        ".ant-menu-submenu:not(.ant-menu-submenu-open) > .ant-menu-submenu-title",
+    ])
 
 
 class InteractionConfig(BaseModel):
@@ -81,6 +86,11 @@ class InteractionConfig(BaseModel):
     dropdown_item_selector: str = (
         ".el-dropdown-menu__item:visible, .ant-dropdown-menu-item:visible, "
         ".dropdown-item:visible, [role='menuitem']:visible"
+    )
+    # Strict dropdown item selector — excludes [role=menuitem] which may match sidebar nav
+    dropdown_item_strict_selector: str = (
+        ".el-dropdown-menu__item:visible, .ant-dropdown-menu-item:visible, "
+        ".dropdown-item:visible"
     )
     modal_selectors: list[str] = Field(default_factory=lambda: [
         ".el-dialog:visible", ".el-drawer:visible",
@@ -106,6 +116,16 @@ class BrowserConfig(BaseModel):
     viewport_width: int = 1920
     viewport_height: int = 1080
     slow_mo: int = 500
+    # CSS selectors for computed style extraction (used in analysis)
+    style_selectors: list[str] = Field(default_factory=lambda: [
+        "body", "header", "nav", "main", "footer",
+        "h1", "h2", "h3", "p", "a", "button",
+        ".sidebar", ".navbar", ".container", ".card",
+        ".el-dialog", ".el-drawer", ".el-form", ".el-table",
+        ".el-aside", ".el-header", ".el-main",
+        ".ant-layout-sider", ".ant-layout-header",
+        '[class*="sidebar"]', '[class*="navbar"]', '[class*="header"]',
+    ])
 
 
 class OutputConfig(BaseModel):

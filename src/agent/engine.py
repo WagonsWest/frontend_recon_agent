@@ -13,7 +13,7 @@ from rich.panel import Panel
 from src.config import AppConfig
 from src.agent.state import (
     AgentPhase, AgentState, ExplorationTarget, StateSnapshot,
-    ActionType, TargetType, VisitStatus,
+    ActionType, TargetType, VisitStatus, PageCoverage,
 )
 from src.agent.logger import RunLogger
 from src.browser.controller import BrowserController
@@ -100,28 +100,27 @@ class ExplorationEngine:
             )
             self.state.add_target(root_target)
 
-            # Main exploration loop
+            # Main exploration loop — frontier contains ONLY route targets
             while True:
-                # OBSERVE current page
+                # OBSERVE current page (discover nav routes)
                 await self._phase_observe()
 
-                # SELECT next action
+                # SELECT next route from frontier
                 target = self._phase_select_action()
                 if target is None:
-                    break  # Frontier empty or budget exhausted
+                    break
 
-                # EXECUTE (includes pre-capture novelty check)
-                snapshot = await self._phase_execute(target)
+                # EXECUTE route navigation
+                snapshot = await self._execute_route(target)
                 if snapshot is None:
-                    # Failed or skipped (low novelty) — still backtrack
-                    await self._phase_backtrack_continue(target)
                     continue
 
-                # ANALYZE (snapshot already passed novelty threshold)
+                # ANALYZE the route page
                 await self._phase_analyze(snapshot)
 
-                # BACKTRACK / CONTINUE
-                await self._phase_backtrack_continue(target)
+                # EXPLORE all interactions on this page (inline, no frontier)
+                if self.state.has_budget():
+                    await self._explore_page_interactions(target)
 
             # FINALIZE
             await self._phase_finalize()
@@ -145,15 +144,12 @@ class ExplorationEngine:
     async def _phase_initialize(self) -> None:
         """INITIALIZE: Launch browser, set up output dirs."""
         self.state.phase = AgentPhase.INITIALIZE
-
-        # Clear previous output BEFORE logger opens the log file
         self.artifacts.clear_output()
 
         with self.logger.timed(AgentPhase.INITIALIZE, "launch_browser") as ctx:
             await self.controller.start()
             ctx["reason"] = "chromium started"
 
-        self.logger.log(AgentPhase.INITIALIZE, "clear_output", "", "success", "output directories cleared")
         console.print("[green]Browser launched, output cleared[/green]")
 
     async def _phase_authenticate(self) -> None:
@@ -175,10 +171,9 @@ class ExplorationEngine:
         raise RuntimeError("Authentication failed after 3 attempts. Check credentials in config.")
 
     async def _phase_observe(self) -> None:
-        """OBSERVE: Extract candidates from current page, add to frontier."""
+        """OBSERVE: Extract route candidates from current page, add to frontier."""
         self.state.phase = AgentPhase.OBSERVE
 
-        page = self.controller.page
         current_url = await self.controller.get_url()
         current_target = self.state.targets.get(self.state.current_target_id or "")
         current_depth = current_target.depth if current_target else 0
@@ -191,19 +186,22 @@ class ExplorationEngine:
 
         with self.logger.timed(AgentPhase.OBSERVE, "extract_candidates",
                                current_target.label if current_target else "root") as ctx:
-            candidates, coverage = await self.extractor.extract_all(page, self.state.current_target_id, current_depth)
-            added = self.state.add_targets(candidates)
-            ctx["reason"] = f"found {len(candidates)} candidates, {added} new"
+            candidates, coverage = await self.extractor.extract_all(
+                self.controller.page, self.state.current_target_id, current_depth
+            )
+            # Only add ROUTE targets to the frontier
+            route_candidates = [c for c in candidates if c.target_type == TargetType.ROUTE]
+            added = self.state.add_targets(route_candidates)
+            ctx["reason"] = f"found {len(route_candidates)} routes, {added} new"
 
-            # Store coverage for this page (only for route targets, first visit)
             if current_target and current_target.id not in self.state.coverage:
                 self.state.coverage[current_target.id] = coverage
 
         if added > 0:
-            console.print(f"[cyan]  Discovered {added} new targets (frontier: {len(self.state.frontier)})[/cyan]")
+            console.print(f"[cyan]  Discovered {added} new routes (frontier: {len(self.state.frontier)})[/cyan]")
 
     def _phase_select_action(self) -> ExplorationTarget | None:
-        """SELECT_ACTION: Pick next target from frontier, check budget."""
+        """SELECT_ACTION: Pick next route from frontier, check budget."""
         self.state.phase = AgentPhase.SELECT_ACTION
 
         if not self.state.has_budget():
@@ -215,7 +213,7 @@ class ExplorationEngine:
         target = self.state.pop_frontier()
         if target is None:
             self.logger.log(AgentPhase.SELECT_ACTION, "frontier_empty", "", "success",
-                          "no more targets to explore")
+                          "no more routes to explore")
             console.print("[yellow]Frontier empty — exploration complete[/yellow]")
             return None
 
@@ -223,97 +221,260 @@ class ExplorationEngine:
                       f"type={target.target_type.value}, depth={target.depth}")
         return target
 
-    async def _phase_execute(self, target: ExplorationTarget) -> StateSnapshot | None:
-        """EXECUTE: Navigate/click to target, capture screenshot + HTML."""
-        self.state.phase = AgentPhase.EXECUTE
+    async def _execute_route(self, target: ExplorationTarget) -> StateSnapshot | None:
+        """Navigate to a route and capture it. Routes are always captured."""
         step = self.state.next_step()
+        console.print(f"\n[bold cyan]Step {step}: route → {target.label}[/bold cyan]")
 
-        console.print(f"\n[bold cyan]Step {step}: {target.target_type.value} → {target.label}[/bold cyan]")
-
-        # Execute the action based on target type
+        # Navigate
         success = False
-        action_type = self._target_to_action(target)
-
         for attempt in range(1 + self.config.budget.retry_limit):
-            with self.logger.timed(AgentPhase.EXECUTE, action_type.value, target.label) as ctx:
+            with self.logger.timed(AgentPhase.EXECUTE, "navigate", target.label) as ctx:
                 try:
-                    success = await self._execute_target(target)
+                    success = await self._navigate_to_target(target)
                     if success:
                         ctx["reason"] = "navigation successful"
                         break
-                    else:
-                        ctx["result"] = "retry" if attempt < self.config.budget.retry_limit else "failed"
-                        ctx["reason"] = f"attempt {attempt + 1} failed"
+                    ctx["result"] = "retry" if attempt < self.config.budget.retry_limit else "failed"
+                    ctx["reason"] = f"attempt {attempt + 1} failed"
                 except Exception as e:
                     ctx["result"] = "retry" if attempt < self.config.budget.retry_limit else "failed"
                     ctx["reason"] = str(e)
-
             if not success and attempt < self.config.budget.retry_limit:
-                console.print(f"[yellow]  Retry {attempt + 1}...[/yellow]")
                 await asyncio.sleep(1)
 
         if not success:
-            retries = self.state.mark_failed(target.id)
-            self.logger.log(AgentPhase.EXECUTE, "mark_failed", target.label, "failed",
-                          f"failed after {retries} attempts")
+            self.state.mark_failed(target.id)
             return None
 
-        # Check session (might have been redirected to login)
+        # Check session
         if not await self.authenticator.check_session():
-            console.print("[yellow]Session expired, re-authenticating...[/yellow]")
             await self.authenticator.re_login()
             return None
 
-        # Pre-capture novelty check: get HTML and score before taking screenshot
+        # Routes are ALWAYS captured
+        snapshot = await self._capture_and_register(target)
+        return snapshot
+
+    async def _explore_page_interactions(self, route_target: ExplorationTarget) -> None:
+        """Explore all interactions on the current page inline (no frontier).
+
+        Order: action dropdowns → dropdown items → add buttons → tabs → expand rows.
+        Each capture goes through novelty check.
+        """
+        page = self.controller.page
+        icfg = self.config.interaction
+        wait = self.config.crawl.wait_after_navigation / 1000
+        timeout = self.config.crawl.interaction_timeout
+        max_items = self.config.crawl.max_interaction_items
+        destructive = self.config.exploration.destructive_keywords
+        strict_dd_selector = self.config.interaction.dropdown_item_strict_selector
+
+        coverage = self.state.coverage.get(route_target.id, PageCoverage())
+        route_label = route_target.label
+
+        console.print(f"[yellow]  Exploring interactions on: {route_label}[/yellow]")
+
+        # ── 1. Action dropdown → click each item ──
+        action_loc, action_count = await self.controller.find_first_visible(icfg.action_button_selectors)
+        if action_loc and action_count > 0:
+            coverage.action_buttons_found = action_count
+            console.print(f"[cyan]    Action buttons: {action_count} found[/cyan]")
+
+            # Click first action button to open dropdown
+            try:
+                await self.controller.click_locator(action_loc.first, wait=0.8)
+                coverage.action_buttons_clicked += 1
+
+                # Capture the dropdown menu state
+                await self._capture_interaction("action_dropdown", route_target, "dropdown")
+
+                # Discover dropdown items
+                items = page.locator(strict_dd_selector)
+                item_count = await items.count()
+                coverage.dropdown_items_found = item_count
+                console.print(f"[cyan]    Dropdown items: {item_count} found[/cyan]")
+
+                # Collect item texts first (before clicking anything)
+                item_texts = []
+                for i in range(min(item_count, max_items)):
+                    try:
+                        text = (await items.nth(i).text_content() or "").strip()
+                        if text:
+                            item_texts.append((i, text))
+                    except Exception:
+                        continue
+
+                # Close the dropdown before clicking items
+                await self.controller.close_overlays()
+
+                # Now click each dropdown item
+                for item_idx, item_text in item_texts:
+                    if not self.state.has_budget():
+                        break
+                    if any(kw.lower() in item_text.lower() for kw in destructive):
+                        console.print(f"[dim]    Skipping destructive: {item_text}[/dim]")
+                        continue
+
+                    coverage.dropdown_item_labels.append(item_text)
+                    console.print(f"[cyan]    Clicking dropdown item: {item_text}[/cyan]")
+
+                    # Re-open dropdown and click the item
+                    try:
+                        await self.controller.click_locator(action_loc.first, wait=0.5)
+                        await asyncio.sleep(0.3)
+
+                        # Re-find items (DOM may have changed)
+                        fresh_items = page.locator(strict_dd_selector)
+                        fresh_count = await fresh_items.count()
+                        if item_idx >= fresh_count:
+                            await self.controller.close_overlays()
+                            continue
+
+                        await fresh_items.nth(item_idx).click()
+                        await asyncio.sleep(wait)
+
+                        # Capture the result
+                        label = f"{item_text}@{route_label}"
+                        captured = await self._capture_interaction(label, route_target, "dropdown_item")
+                        if captured:
+                            coverage.dropdown_items_explored += 1
+
+                        # Recover: close modal or go back
+                        if await self.controller.is_modal_open():
+                            await self.controller.close_overlays()
+                        else:
+                            # Might have navigated to a new page — go back
+                            current_url = await self.controller.get_url()
+                            if self._normalize_url(current_url) != self._normalize_url(
+                                    await self._get_route_url(route_target)):
+                                await self.controller.go_back()
+                                await asyncio.sleep(wait)
+
+                    except Exception as e:
+                        console.print(f"[dim]    Failed: {item_text} ({e})[/dim]")
+                        await self.controller.close_overlays()
+
+            except Exception as e:
+                console.print(f"[dim]    Action dropdown failed: {e}[/dim]")
+                await self.controller.close_overlays()
+
+        # ── 2. Add/create button → modal ──
+        add_loc, _ = await self.controller.find_first_visible(icfg.add_button_selectors)
+        if add_loc:
+            coverage.add_buttons_found += 1
+            try:
+                add_text = (await add_loc.first.text_content() or "add").strip()
+                console.print(f"[cyan]    Add button: {add_text}[/cyan]")
+                await self.controller.click_locator(add_loc.first, wait=wait)
+
+                label = f"add_form_{add_text}@{route_label}"
+                captured = await self._capture_interaction(label, route_target, "modal")
+                if captured:
+                    coverage.add_buttons_clicked += 1
+
+                await self.controller.close_overlays()
+            except Exception as e:
+                console.print(f"[dim]    Add button failed: {e}[/dim]")
+                await self.controller.close_overlays()
+
+        # ── 3. Expandable rows ──
+        expand_loc, expand_count = await self.controller.find_first_visible(icfg.expand_selectors)
+        if expand_loc and expand_count > 0:
+            coverage.expand_rows_found = expand_count
+            try:
+                console.print(f"[cyan]    Expandable rows: {expand_count} found[/cyan]")
+                await self.controller.click_locator(expand_loc.first, wait=1.0)
+
+                label = f"expand_row@{route_label}"
+                captured = await self._capture_interaction(label, route_target, "expanded_row")
+                if captured:
+                    coverage.expand_rows_expanded += 1
+            except Exception:
+                pass
+
+        # ── 4. Tabs ──
+        try:
+            tabs = page.locator(icfg.tab_selector)
+            tab_count = await tabs.count()
+            if tab_count > 0:
+                coverage.tabs_found = tab_count
+                console.print(f"[cyan]    Tabs: {tab_count} found[/cyan]")
+                for i in range(min(tab_count, 4)):
+                    if not self.state.has_budget():
+                        break
+                    try:
+                        tab = tabs.nth(i)
+                        if not await tab.is_visible():
+                            continue
+                        tab_text = (await tab.text_content() or "").strip()
+                        if not tab_text:
+                            continue
+                        coverage.tab_labels.append(tab_text)
+
+                        console.print(f"[cyan]    Switching tab: {tab_text}[/cyan]")
+                        await tab.click()
+                        await asyncio.sleep(wait)
+
+                        label = f"tab_{tab_text}@{route_label}"
+                        captured = await self._capture_interaction(label, route_target, "tab_state")
+                        if captured:
+                            coverage.tabs_switched += 1
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        # Update coverage
+        if route_target.id in self.state.coverage:
+            self.state.coverage[route_target.id] = coverage
+
+    async def _capture_interaction(self, label: str, parent_target: ExplorationTarget,
+                                    context: str) -> bool:
+        """Capture an interaction state with novelty check. Returns True if captured."""
+        if not self.state.has_budget():
+            return False
+
+        # Novelty check
         html = await self.controller.get_html()
         novelty, fingerprint = self.novelty_scorer.score(html)
         threshold = self.config.budget.novelty_threshold
 
         if novelty < threshold:
-            # Low novelty — mark visited but DON'T consume budget or capture screenshot
-            self.state.mark_visited(target.id)
             self.novelty_scorer.register(html, fingerprint)
-            self.logger.log(AgentPhase.EVAL_NOVELTY, "skip_duplicate", target.label,
-                          "skipped", f"novelty={novelty:.2f} < {threshold}")
-            console.print(f"[dim]  Low novelty ({novelty:.2f}) — skipping capture entirely[/dim]")
+            console.print(f"[dim]    Low novelty ({novelty:.2f}) — skipped[/dim]")
+            self.logger.log(AgentPhase.EVAL_NOVELTY, "skip_interaction", label,
+                          "skipped", f"novelty={novelty:.2f}")
+            return False
 
-            # Still create a minimal snapshot for the inventory (no files saved)
-            url = await self.controller.get_url()
-            snapshot = StateSnapshot.create(
-                target_id=target.id, url=url, title=await self.controller.get_title(),
-                visit_status=VisitStatus.SKIPPED, depth=target.depth,
-                novelty_score=novelty, dom_fingerprint=fingerprint,
-            )
-            snapshot.metadata = {"skipped_reason": "low_novelty"}
-            self.state.register_state(snapshot)
-            self.state.current_target_id = target.id
-            return None  # Don't proceed to analyze
+        # Capture
+        url = await self.controller.get_url()
+        title = await self.controller.get_title()
+        screenshot_path = await self.controller.capture_screenshot(label, context)
+        html_path = await self.controller.save_html(label, context)
 
-        # Novel enough — capture screenshot + DOM, consume budget
-        snapshot = await self._capture_state(target)
-        if snapshot:
-            snapshot.novelty_score = novelty
-            snapshot.dom_fingerprint = fingerprint
-            self.novelty_scorer.register(html, fingerprint)
-            self.state.mark_visited(target.id)
-            self.state.consume_budget()
+        snapshot = StateSnapshot.create(
+            target_id=parent_target.id,
+            url=url, title=title,
+            screenshot_path=screenshot_path, html_path=html_path,
+            visit_status=VisitStatus.SUCCESS,
+            depth=parent_target.depth + 1,
+            novelty_score=novelty, dom_fingerprint=fingerprint,
+        )
+        self.state.register_state(snapshot)
+        self.state.consume_budget()
+        self.novelty_scorer.register(html, fingerprint)
 
-            # Add edge from previous state
-            if self.state.current_state_id:
-                self.state.add_edge(
-                    self.state.current_state_id, snapshot.id,
-                    action_type, target.locator, target.label,
-                )
+        # Analyze
+        computed_styles = await self.controller.get_computed_styles()
+        analysis = self.analyzer.analyze(html, computed_styles)
+        self._analysis_results[snapshot.id] = analysis
+        self.artifacts.save_analysis(snapshot.id, analysis)
 
-            self.state.current_state_id = snapshot.id
-            self.state.current_target_id = target.id
-
-            # Update parent coverage tracking
-            self._update_coverage(target)
-
-            console.print(f"[green]  Captured: {snapshot.url} (novelty={novelty:.2f})[/green]")
-
-        return snapshot
+        self.logger.log(AgentPhase.EXECUTE, f"capture_{context}", label,
+                      "success", f"novelty={novelty:.2f}")
+        console.print(f"[green]    Captured: {url} (novelty={novelty:.2f})[/green]")
+        return True
 
     async def _phase_analyze(self, snapshot: StateSnapshot) -> None:
         """ANALYZE: Run local page analysis on the captured state."""
@@ -337,34 +498,6 @@ class ExplorationEngine:
             self.artifacts.save_analysis(snapshot.id, analysis)
             ctx["reason"] = f"components: {', '.join(analysis.get('component_types', []))}"
 
-    async def _phase_backtrack_continue(self, target: ExplorationTarget) -> None:
-        """BACKTRACK_CONTINUE: Close overlays or go back if needed."""
-        self.state.phase = AgentPhase.BACKTRACK_CONTINUE
-
-        if target.target_type in (TargetType.MODAL, TargetType.DROPDOWN):
-            # Close the overlay
-            await self.controller.close_overlays()
-            self.logger.log(AgentPhase.BACKTRACK_CONTINUE, "close_overlay", target.label,
-                          "success", "overlay closed")
-
-        elif target.target_type == TargetType.DROPDOWN_ITEM:
-            # Dropdown item may have opened a modal, navigated to a new page, or both
-            if await self.controller.is_modal_open():
-                await self.controller.close_overlays()
-                self.logger.log(AgentPhase.BACKTRACK_CONTINUE, "close_overlay", target.label,
-                              "success", "modal from dropdown item closed")
-            else:
-                # May have navigated — go back to parent page
-                await self.controller.go_back()
-                self.logger.log(AgentPhase.BACKTRACK_CONTINUE, "go_back", target.label,
-                              "success", "returned from dropdown item page")
-
-        elif target.target_type == TargetType.EXPANDED_ROW:
-            pass
-
-        elif target.target_type == TargetType.TAB_STATE:
-            pass
-
     async def _phase_finalize(self) -> None:
         """FINALIZE: Generate all artifacts and report."""
         self.state.phase = AgentPhase.FINALIZE
@@ -372,19 +505,16 @@ class ExplorationEngine:
 
         console.print("\n[bold]Generating artifacts...[/bold]")
 
-        # Inventory
         with self.logger.timed(AgentPhase.FINALIZE, "generate_inventory") as ctx:
             inventory = InventoryGenerator().generate(self.state)
             path = self.artifacts.save_json("inventory.json", inventory)
             ctx["reason"] = f"{len(inventory)} entries → {path.name}"
 
-        # Sitemap
         with self.logger.timed(AgentPhase.FINALIZE, "generate_sitemap") as ctx:
             sitemap = SitemapGenerator().generate(self.state)
             path = self.artifacts.save_json("sitemap.json", sitemap)
             ctx["reason"] = f"{sitemap['stats']['total_nodes']} nodes → {path.name}"
 
-        # Coverage
         with self.logger.timed(AgentPhase.FINALIZE, "generate_coverage") as ctx:
             from dataclasses import asdict
             coverage_data = {tid: asdict(cov) for tid, cov in self.state.coverage.items()}
@@ -392,7 +522,6 @@ class ExplorationEngine:
             pages_with_gaps = sum(1 for c in self.state.coverage.values() if c.has_unexplored)
             ctx["reason"] = f"{len(coverage_data)} pages, {pages_with_gaps} with gaps → {path.name}"
 
-        # Report
         with self.logger.timed(AgentPhase.FINALIZE, "generate_report") as ctx:
             report = ReportGenerator().generate(
                 self.state, self._start_time, end_time, self._analysis_results
@@ -400,7 +529,6 @@ class ExplorationEngine:
             path = self.artifacts.save_text("exploration_report.md", report)
             ctx["reason"] = f"report → {path.name}"
 
-        # Print summary
         stats = self.state.get_stats()
         console.print(Panel.fit(
             f"[bold green]Exploration Complete[/bold green]\n\n"
@@ -418,55 +546,75 @@ class ExplorationEngine:
 
     # ── Helpers ──
 
-    def _update_coverage(self, target: ExplorationTarget) -> None:
-        """Update parent page's coverage counters when an interaction target is explored."""
-        if not target.parent_id or target.parent_id not in self.state.coverage:
-            return
-        cov = self.state.coverage[target.parent_id]
-        if target.target_type == TargetType.DROPDOWN:
-            cov.action_buttons_clicked += 1
-        elif target.target_type == TargetType.DROPDOWN_ITEM:
-            cov.dropdown_items_explored += 1
-        elif target.target_type == TargetType.MODAL:
-            cov.add_buttons_clicked += 1
-        elif target.target_type == TargetType.TAB_STATE:
-            cov.tabs_switched += 1
-        elif target.target_type == TargetType.EXPANDED_ROW:
-            cov.expand_rows_expanded += 1
+    async def _navigate_to_target(self, target: ExplorationTarget) -> bool:
+        """Navigate to a route target by URL or click."""
+        locator = target.locator
+        url_before = await self.controller.get_url()
 
-    async def _navigate_to_parent_page(self, target: ExplorationTarget) -> bool:
-        """For non-route targets, navigate to the parent route first."""
-        if target.target_type == TargetType.ROUTE:
-            return True  # Routes navigate themselves
+        if locator.startswith(("http://", "https://", "#", "/")):
+            url = locator
+            if locator.startswith(("#", "/")):
+                parsed = urlparse(url_before)
+                if locator.startswith("#"):
+                    url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}{locator}"
+                else:
+                    url = f"{parsed.scheme}://{parsed.netloc}{locator}"
+            return await self.controller.goto(url)
+        else:
+            clicked = await self.controller.click(locator, timeout=self.config.crawl.interaction_timeout)
+            if clicked:
+                url_after = await self.controller.get_url()
+                if url_after == url_before:
+                    return False
+            return clicked
 
-        # Find the parent route target
-        parent_id = target.parent_id
-        while parent_id:
-            parent = self.state.targets.get(parent_id)
-            if not parent:
-                break
-            if parent.target_type == TargetType.ROUTE:
-                # Navigate to this route
-                current_url = await self.controller.get_url()
-                parent_locator = parent.locator
-                if parent_locator.startswith(("http://", "https://", "#", "/")):
-                    if parent_locator.startswith(("#", "/")):
-                        parsed = urlparse(current_url)
-                        if parent_locator.startswith("#"):
-                            parent_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}{parent_locator}"
-                        else:
-                            parent_url = f"{parsed.scheme}://{parsed.netloc}{parent_locator}"
-                    else:
-                        parent_url = parent_locator
+    async def _capture_and_register(self, target: ExplorationTarget) -> StateSnapshot | None:
+        """Capture current page state and register it."""
+        try:
+            url = await self.controller.get_url()
+            title = await self.controller.get_title()
+            label = target.label or self._url_to_label(url)
 
-                    # Check if already on parent page
-                    if self._normalize_url(current_url) == self._normalize_url(parent_url):
-                        return True
+            # Get novelty (for logging, routes are always captured)
+            html = await self.controller.get_html()
+            novelty, fingerprint = self.novelty_scorer.score(html)
+            self.novelty_scorer.register(html, fingerprint)
 
-                    return await self.controller.goto(parent_url)
-                break
-            parent_id = parent.parent_id
-        return True  # No parent found, try anyway
+            screenshot_path = await self.controller.capture_screenshot(label, "route")
+            html_path = await self.controller.save_html(label, "route")
+
+            snapshot = StateSnapshot.create(
+                target_id=target.id, url=url, title=title,
+                screenshot_path=screenshot_path, html_path=html_path,
+                visit_status=VisitStatus.SUCCESS, depth=target.depth,
+                novelty_score=novelty, dom_fingerprint=fingerprint,
+            )
+
+            self.state.register_state(snapshot)
+            self.state.mark_visited(target.id)
+            self.state.consume_budget()
+            self.state.current_state_id = snapshot.id
+            self.state.current_target_id = target.id
+
+            console.print(f"[green]  Captured: {url} (novelty={novelty:.2f})[/green]")
+            return snapshot
+
+        except Exception as e:
+            console.print(f"[red]  Capture failed: {e}[/red]")
+            return None
+
+    async def _get_route_url(self, route_target: ExplorationTarget) -> str:
+        """Get the full URL for a route target."""
+        locator = route_target.locator
+        if locator.startswith(("http://", "https://")):
+            return locator
+        if locator.startswith(("#", "/")):
+            base = self.config.target.url
+            parsed = urlparse(base)
+            if locator.startswith("#"):
+                return f"{parsed.scheme}://{parsed.netloc}{parsed.path}{locator}"
+            return f"{parsed.scheme}://{parsed.netloc}{locator}"
+        return locator
 
     def _normalize_url(self, url: str) -> str:
         """Normalize URL for comparison."""
@@ -474,206 +622,6 @@ class ExplorationEngine:
         if parsed.fragment and parsed.fragment.startswith("/"):
             return f"{parsed.scheme}://{parsed.netloc}{parsed.path}#{parsed.fragment.split('?')[0]}"
         return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-
-    async def _execute_target(self, target: ExplorationTarget) -> bool:
-        """Execute navigation/interaction for a target."""
-        # For non-route targets, navigate to parent page first
-        if target.target_type != TargetType.ROUTE:
-            if not await self._navigate_to_parent_page(target):
-                return False
-
-        if target.target_type == TargetType.ROUTE:
-            locator = target.locator
-            url_before = await self.controller.get_url()
-
-            if locator.startswith(("http://", "https://", "#", "/")):
-                # Direct URL navigation
-                url = locator
-                if locator.startswith(("#", "/")):
-                    base = url_before
-                    parsed = urlparse(base)
-                    if locator.startswith("#"):
-                        url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}{locator}"
-                    else:
-                        url = f"{parsed.scheme}://{parsed.netloc}{locator}"
-                return await self.controller.goto(url)
-            else:
-                # CSS selector — click it and verify URL changed
-                clicked = await self.controller.click(locator, timeout=self.config.crawl.interaction_timeout)
-                if clicked:
-                    url_after = await self.controller.get_url()
-                    if url_after == url_before:
-                        # Click didn't navigate — probably a sub-menu toggle
-                        return False
-                return clicked
-
-        elif target.target_type == TargetType.DROPDOWN:
-            clicked = await self.controller.click(target.locator, timeout=self.config.crawl.interaction_timeout)
-            if clicked:
-                # Detect dropdown items and add them as targets
-                await self._discover_dropdown_items(target)
-            return clicked
-
-        elif target.target_type == TargetType.DROPDOWN_ITEM:
-            return await self._execute_dropdown_item(target)
-
-        elif target.target_type == TargetType.MODAL:
-            return await self.controller.click(target.locator, timeout=self.config.crawl.interaction_timeout)
-
-        elif target.target_type == TargetType.TAB_STATE:
-            return await self.controller.click(target.locator, timeout=self.config.crawl.interaction_timeout)
-
-        elif target.target_type == TargetType.EXPANDED_ROW:
-            return await self.controller.click(target.locator, timeout=self.config.crawl.interaction_timeout)
-
-        return False
-
-    async def _discover_dropdown_items(self, dropdown_target: ExplorationTarget) -> None:
-        """After opening a dropdown, detect individual menu items and add them as targets."""
-        page = self.controller.page
-        icfg = self.config.interaction
-        destructive = self.config.exploration.destructive_keywords
-
-        # Use strict dropdown-only selectors (not [role=menuitem] which matches sidebar)
-        strict_selector = (
-            ".el-dropdown-menu__item:visible, "
-            ".ant-dropdown-menu-item:visible, "
-            ".dropdown-item:visible"
-        )
-
-        try:
-            await asyncio.sleep(0.5)  # Wait for dropdown animation
-            items = page.locator(strict_selector)
-            count = await items.count()
-
-            if count == 0:
-                return
-
-            # Find the parent route target for these items
-            route_parent_id = dropdown_target.parent_id
-
-            added = 0
-            max_items = self.config.crawl.max_interaction_items
-            for i in range(min(count, max_items)):
-                try:
-                    item = items.nth(i)
-                    if not await item.is_visible():
-                        continue
-                    text = (await item.text_content() or "").strip()
-                    if not text:
-                        continue
-
-                    # Skip destructive actions
-                    if any(kw.lower() in text.lower() for kw in destructive):
-                        continue
-
-                    target = ExplorationTarget.create(
-                        target_type=TargetType.DROPDOWN_ITEM,
-                        locator=f"{icfg.dropdown_item_selector} >> nth={i}",
-                        label=f"{text}@{dropdown_target.label}",
-                        parent_id=route_parent_id,
-                        depth=dropdown_target.depth + 1,
-                        discovery_method="dropdown_item",
-                        metadata={
-                            "item_text": text,
-                            "item_index": i,
-                            "dropdown_target_id": dropdown_target.id,
-                            "dropdown_selector": dropdown_target.locator,
-                        },
-                    )
-                    if self.state.add_target(target):
-                        added += 1
-                except Exception:
-                    continue
-
-            if added > 0:
-                console.print(f"[cyan]  Discovered {added} dropdown items[/cyan]")
-
-            # Update coverage
-            if dropdown_target.parent_id and dropdown_target.parent_id in self.state.coverage:
-                cov = self.state.coverage[dropdown_target.parent_id]
-                cov.dropdown_items_found = max(cov.dropdown_items_found, count)
-
-        except Exception:
-            pass
-
-    async def _execute_dropdown_item(self, target: ExplorationTarget) -> bool:
-        """Execute a dropdown item: open the dropdown first, then click the specific item."""
-        meta = target.metadata
-        dropdown_selector = meta.get("dropdown_selector", "")
-        item_index = meta.get("item_index", 0)
-
-        # Use strict dropdown-only selectors
-        strict_selector = (
-            ".el-dropdown-menu__item:visible, "
-            ".ant-dropdown-menu-item:visible, "
-            ".dropdown-item:visible"
-        )
-
-        # Open the dropdown
-        if dropdown_selector:
-            clicked = await self.controller.click(dropdown_selector, timeout=self.config.crawl.interaction_timeout)
-            if not clicked:
-                return False
-            await asyncio.sleep(0.5)
-
-        # Click the specific item
-        try:
-            items = self.controller.page.locator(strict_selector)
-            count = await items.count()
-            if item_index >= count:
-                return False
-
-            item = items.nth(item_index)
-            if not await item.is_visible():
-                return False
-
-            await item.click()
-            await asyncio.sleep(self.config.crawl.wait_after_navigation / 1000)
-            return True
-        except Exception:
-            return False
-
-    async def _capture_state(self, target: ExplorationTarget) -> StateSnapshot | None:
-        """Capture current browser state as a snapshot."""
-        try:
-            url = await self.controller.get_url()
-            title = await self.controller.get_title()
-
-            label = target.label or self._url_to_label(url)
-            context = target.target_type.value
-
-            screenshot_path = await self.controller.capture_screenshot(label, context)
-            html_path = await self.controller.save_html(label, context)
-
-            snapshot = StateSnapshot.create(
-                target_id=target.id,
-                url=url,
-                title=title,
-                screenshot_path=screenshot_path,
-                html_path=html_path,
-                visit_status=VisitStatus.SUCCESS,
-                depth=target.depth,
-            )
-
-            self.state.register_state(snapshot)
-            return snapshot
-
-        except Exception as e:
-            console.print(f"[red]  Capture failed: {e}[/red]")
-            return None
-
-    def _target_to_action(self, target: ExplorationTarget) -> ActionType:
-        """Map target type to action type."""
-        mapping = {
-            TargetType.ROUTE: ActionType.NAVIGATE,
-            TargetType.MODAL: ActionType.OPEN_MODAL,
-            TargetType.DROPDOWN: ActionType.CLICK_ACTION,
-            TargetType.DROPDOWN_ITEM: ActionType.CLICK_DROPDOWN_ITEM,
-            TargetType.TAB_STATE: ActionType.SWITCH_TAB,
-            TargetType.EXPANDED_ROW: ActionType.EXPAND_ROW,
-        }
-        return mapping.get(target.target_type, ActionType.NAVIGATE)
 
     def _url_to_label(self, url: str) -> str:
         """Extract a human-readable label from URL."""

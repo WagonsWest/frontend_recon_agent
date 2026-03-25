@@ -172,35 +172,32 @@ class BrowserController:
 
     async def get_computed_styles(self) -> dict[str, dict[str, str]]:
         """Extract computed styles for key layout elements."""
-        return await self.evaluate("""
-            () => {
-                const selectors = ['body', 'header', 'nav', 'main', 'footer',
-                    'h1', 'h2', 'h3', 'p', 'a', 'button',
-                    '.sidebar', '.navbar', '.container', '.card',
-                    '.el-dialog', '.el-drawer', '.el-form', '.el-table',
-                    '.el-aside', '.el-header', '.el-main',
-                    '.ant-layout-sider', '.ant-layout-header',
-                    '[class*="sidebar"]', '[class*="navbar"]', '[class*="header"]'];
-                const result = {};
-                for (const sel of selectors) {
-                    try {
-                        const el = document.querySelector(sel);
-                        if (!el) continue;
-                        const cs = window.getComputedStyle(el);
-                        result[sel] = {
-                            color: cs.color, backgroundColor: cs.backgroundColor,
-                            fontFamily: cs.fontFamily, fontSize: cs.fontSize,
-                            fontWeight: cs.fontWeight, padding: cs.padding,
-                            margin: cs.margin, display: cs.display,
-                            position: cs.position, width: cs.width,
-                            height: cs.height, borderRadius: cs.borderRadius,
-                            boxShadow: cs.boxShadow,
-                        };
-                    } catch (e) {}
+        selectors = self.config.browser.style_selectors
+        try:
+            return await self.page.evaluate("""
+                (selectors) => {
+                    const result = {};
+                    for (const sel of selectors) {
+                        try {
+                            const el = document.querySelector(sel);
+                            if (!el) continue;
+                            const cs = window.getComputedStyle(el);
+                            result[sel] = {
+                                color: cs.color, backgroundColor: cs.backgroundColor,
+                                fontFamily: cs.fontFamily, fontSize: cs.fontSize,
+                                fontWeight: cs.fontWeight, padding: cs.padding,
+                                margin: cs.margin, display: cs.display,
+                                position: cs.position, width: cs.width,
+                                height: cs.height, borderRadius: cs.borderRadius,
+                                boxShadow: cs.boxShadow,
+                            };
+                        } catch (e) {}
+                    }
+                    return result;
                 }
-                return result;
-            }
-        """, default={})
+            """, selectors)
+        except Exception:
+            return {}
 
     async def find_first_visible(self, selectors: list[str]) -> tuple[Locator | None, int]:
         """Find first visible element matching any selector. Returns (locator, count)."""

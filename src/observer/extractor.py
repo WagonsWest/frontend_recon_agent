@@ -19,11 +19,7 @@ class CandidateExtractor:
 
     async def _expand_submenus(self, page: Page) -> None:
         """Expand collapsed sub-menus so leaf items become visible."""
-        submenu_selectors = [
-            ".el-sub-menu:not(.is-opened) > .el-sub-menu__title",
-            ".ant-menu-submenu:not(.ant-menu-submenu-open) > .ant-menu-submenu-title",
-        ]
-        for selector in submenu_selectors:
+        for selector in self.config.exploration.submenu_expand_selectors:
             try:
                 submenus = page.locator(selector)
                 count = await submenus.count()
