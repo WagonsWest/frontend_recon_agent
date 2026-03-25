@@ -21,8 +21,11 @@ Observation Layer (Python — candidate detection, fingerprinting, novelty scori
 Execution Layer   (Playwright — navigate, click, capture)
 ```
 
-The agent runs as a state machine with 8 phases:
-`initialize → authenticate → observe → select_action → execute → eval_novelty → analyze → backtrack_continue → finalize`
+For each route page, the agent:
+1. Navigates and captures the page
+2. Explores all interactions inline (action dropdowns, dropdown items, add buttons, tabs, expandable rows)
+3. Uses novelty scoring to skip duplicate interaction states
+4. Moves to the next route
 
 ## Quick Start
 
@@ -51,18 +54,72 @@ python -m src.cli [OPTIONS]
   --clear                Clear output before running
 ```
 
-## Configuration
+## Targeting a New Website
+
+1. Copy the template config:
+   ```bash
+   cp config/settings.yaml config/settings.local.yaml
+   ```
+
+2. Edit `config/settings.local.yaml` with your target:
+
+   ```yaml
+   # Required — your target site
+   target:
+     url: "https://your-site.com/login"          # Login page URL
+     dashboard_url: "https://your-site.com/home"  # Page after login (or leave empty)
+
+   # Required — your credentials
+   login:
+     username: "your_username"
+     password: "your_password"
+   ```
+
+   That's it for most Element Plus / Ant Design / Bootstrap admin sites. The defaults handle the rest.
+
+3. **If the site uses a custom UI framework**, also configure selectors:
+
+   ```yaml
+   # Optional — customize for non-standard UI frameworks
+   login:
+     username_selector: "input#my-username"    # CSS selector for username field
+     password_selector: "input#my-password"
+     submit_selector: "button#login-btn"
+
+   exploration:
+     nav_selectors:                            # How to find sidebar/nav menu items
+       - ".my-nav-item a[href]"
+       - ".sidebar-link"
+     submenu_expand_selectors:                 # How to expand collapsed sub-menus
+       - ".my-submenu:not(.open) > .toggle"
+
+   interaction:
+     action_button_selectors:                  # Action/operation buttons on table rows
+       - "button:has-text('Actions')"
+     modal_selectors:                          # How to detect open modals/dialogs
+       - ".my-modal:visible"
+     modal_close_selectors:                    # How to close modals
+       - ".my-modal .close-btn"
+   ```
+
+4. Run:
+   ```bash
+   python -m src.cli
+   ```
+
+## Configuration Reference
 
 Edit `config/settings.local.yaml`:
 
 | Section | Key Settings |
 |---------|-------------|
-| `target` | Login URL, dashboard URL |
-| `login` | Username, password, form selectors |
-| `budget` | `max_states`, `max_depth`, `retry_limit`, `novelty_threshold` |
-| `exploration` | `skip_patterns`, `destructive_keywords`, `nav_selectors` |
+| `target` | `url` (login page), `dashboard_url` (page after login) |
+| `login` | `username`, `password`, form element selectors |
+| `crawl` | `wait_after_navigation`, `wait_for_spa`, `interaction_timeout` |
+| `budget` | `max_states` (capture limit), `max_depth`, `retry_limit`, `novelty_threshold` |
+| `exploration` | `nav_selectors`, `submenu_expand_selectors`, `skip_patterns`, `destructive_keywords` |
 | `interaction` | Selectors for action buttons, modals, dropdowns, tabs, expand rows |
-| `browser` | Headless mode, viewport size, slow_mo |
+| `browser` | `headless`, `viewport_width/height`, `slow_mo` |
 
 ## Output
 
@@ -75,6 +132,7 @@ output/
 ├── artifacts/
 │   ├── inventory.json      # Page inventory with status, paths, novelty scores
 │   ├── sitemap.json        # Traversal graph (nodes, edges, groups)
+│   ├── coverage.json       # Per-page coverage (what was explored vs missed)
 │   ├── run_log.jsonl       # Step-by-step execution log
 │   └── analysis/           # Per-state analysis (components, layout, tokens)
 │       ├── state_xxxx.json
