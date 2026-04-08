@@ -2,6 +2,8 @@
 
 A budget-aware, policy-driven browser agent for autonomous website exploration, artifact collection, and selective analysis. Optimized for admin dashboards, LIMS, ERP, and SaaS management applications.
 
+The current implementation now also supports optional vision-assisted page understanding, structured extraction for list/detail/form pages, and competitive-analysis artifacts in both JSON and Markdown.
+
 ## What It Does
 
 1. **Logs into** a target website using configured credentials
@@ -120,6 +122,7 @@ Edit `config/settings.local.yaml`:
 | `exploration` | `nav_selectors`, `submenu_expand_selectors`, `skip_patterns`, `destructive_keywords` |
 | `interaction` | Selectors for action buttons, modals, dropdowns, tabs, expand rows |
 | `browser` | `headless`, `viewport_width/height`, `slow_mo` |
+| `vision` | `enabled`, `provider`, `model`, `api_base_url`, `api_key_env`, `timeout_ms` |
 
 ## Output
 
@@ -153,12 +156,28 @@ output/
 
 ## Workflow with Claude/ChatGPT
 
+## Current Extensions
+
+- Optional vision-enhanced page understanding
+- Structured extraction for list/detail/form pages
+- Dataset artifacts:
+  - `dataset.jsonl`
+  - `dataset_summary.json`
+  - `extraction_failures.json`
+- Competitive-analysis outputs:
+  - `competitive_analysis.json`
+  - `competitive_analysis.md`
+
+Notes:
+- DOM-first exploration and local analysis work without API keys
+- Vision enhancement requires API credentials because screenshot understanding is provider-backed
+
 The intended workflow:
 
 1. Run the agent: `python -m src.cli`
-2. Bring the outputs to Claude Code or ChatGPT
-3. Ask: "Review the exploration report and screenshots, then rebuild the frontend"
-4. The LLM reads the structured artifacts and generates code
+2. Review `exploration_report.md`, `dataset.jsonl`, and `competitive_analysis.md`
+3. Bring the outputs to Claude Code or ChatGPT
+4. Ask for a product teardown, frontend rebuild, or benchmark comparison using the generated artifacts
 
 ## Requirements
 

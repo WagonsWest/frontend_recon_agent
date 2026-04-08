@@ -151,6 +151,15 @@ class BrowserController:
         await self.page.screenshot(path=str(path), full_page=True)
         return str(path)
 
+    async def capture_viewport_screenshot(self, label: str, context: str = "vision") -> str:
+        """Take a viewport screenshot. Returns path."""
+        self._capture_counter += 1
+        safe_label = re.sub(r'[^\w\-\u4e00-\u9fff]', '_', label)[:40]
+        name = f"{self._capture_counter:03d}_{safe_label}_{context}.png"
+        path = self._project_root / self.config.output.screenshots_dir / name
+        await self.page.screenshot(path=str(path), full_page=False)
+        return str(path)
+
     async def save_html(self, label: str, context: str = "nav") -> str:
         """Save current DOM to file. Returns path."""
         html = await self.get_html()

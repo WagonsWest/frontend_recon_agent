@@ -128,6 +128,18 @@ class BrowserConfig(BaseModel):
     ])
 
 
+class VisionConfig(BaseModel):
+    enabled: bool = False
+    provider: str = "openai"
+    model: str = "gpt-4.1-mini"
+    api_base_url: str = "https://api.openai.com/v1"
+    api_key_env: str = "OPENAI_API_KEY"
+    timeout_ms: int = 15000
+    max_image_side: int = 1440
+    artifact_dir: str = "vision"
+    page_insights_dir: str = "page_insights"
+
+
 class OutputConfig(BaseModel):
     screenshots_dir: str = "output/screenshots"
     dom_snapshots_dir: str = "output/dom_snapshots"
@@ -143,6 +155,7 @@ class AppConfig(BaseModel):
     exploration: ExplorationConfig = Field(default_factory=ExplorationConfig)
     interaction: InteractionConfig = Field(default_factory=InteractionConfig)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
+    vision: VisionConfig = Field(default_factory=VisionConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
 
 

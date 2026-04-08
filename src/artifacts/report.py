@@ -12,7 +12,9 @@ class ReportGenerator:
     """Generates final markdown exploration report."""
 
     def generate(self, state: AgentState, start_time: str, end_time: str,
-                 analysis_results: dict[str, dict] | None = None) -> str:
+                 analysis_results: dict[str, dict] | None = None,
+                 page_insights: dict[str, dict] | None = None,
+                 extraction_results: dict[str, dict] | None = None) -> str:
         """Generate comprehensive exploration report."""
         stats = state.get_stats()
 
@@ -21,11 +23,33 @@ class ReportGenerator:
             self._site_architecture(state),
             self._page_coverage(state),
             self._page_patterns(state, analysis_results),
+            self._page_semantics(page_insights),
+            self._extraction_summary(extraction_results),
             self._coverage_gaps(state),
             self._artifacts_section(state, stats),
         ]
 
         return "\n\n".join(sections)
+
+    def _unique_page_insights(self, page_insights: dict[str, dict] | None) -> list[dict]:
+        """Deduplicate page insights by URL, preferring captured states over observe placeholders."""
+        if not page_insights:
+            return []
+
+        deduped: dict[str, dict] = {}
+        for state_id, insight in page_insights.items():
+            url = str(insight.get("url", "")).strip() or state_id
+            existing = deduped.get(url)
+            if existing is None:
+                deduped[url] = insight
+                continue
+
+            existing_id = str(existing.get("state_id", ""))
+            candidate_id = str(insight.get("state_id", ""))
+            if existing_id.startswith("observe_") and not candidate_id.startswith("observe_"):
+                deduped[url] = insight
+
+        return list(deduped.values())
 
     def _header(self, state: AgentState, start_time: str, end_time: str, stats: dict) -> str:
         """Run summary header."""
@@ -226,10 +250,96 @@ class ReportGenerator:
 
         return "\n".join(lines)
 
+    def _page_semantics(self, page_insights: dict[str, dict] | None) -> str:
+        """Summarize page semantics from DOM and vision understanding."""
+        lines = ["## Page Semantics", ""]
+
+        if not page_insights:
+            lines.append("_No page insight artifacts available._")
+            return "\n".join(lines)
+
+        page_type_counter: dict[str, int] = {}
+        mismatch_lines: list[str] = []
+
+        for insight in self._unique_page_insights(page_insights):
+            page_type_vision = insight.get("page_type_vision")
+            page_type_dom = insight.get("page_type_dom", "unknown")
+            page_type = page_type_vision if page_type_vision and page_type_vision != "unknown" else page_type_dom
+            page_type_counter[page_type] = page_type_counter.get(page_type, 0) + 1
+
+            page_type_vision = insight.get("page_type_vision", "unknown")
+            if page_type_vision != "unknown" and page_type_dom != page_type_vision:
+                mismatch_lines.append(
+                    f"- `{insight.get('url', '')}`: DOM={page_type_dom}, vision={page_type_vision}"
+                )
+
+        lines.append("### Vision/DOM Page Type Distribution")
+        for page_type, count in sorted(page_type_counter.items(), key=lambda x: (-x[1], x[0])):
+            lines.append(f"- **{page_type}**: {count} pages")
+
+        if mismatch_lines:
+            lines.append("")
+            lines.append("### DOM/Vision Differences")
+            lines.extend(mismatch_lines[:10])
+
+        return "\n".join(lines)
+
+    def _extraction_summary(self, extraction_results: dict[str, dict] | None) -> str:
+        """Summarize structured extraction outputs."""
+        lines = ["## Structured Extraction", ""]
+
+        if not extraction_results:
+            lines.append("_No extraction results available._")
+            return "\n".join(lines)
+
+        status_counts: dict[str, int] = {}
+        strategy_counts: dict[str, int] = {}
+
+        for result in extraction_results.values():
+            status = str(result.get("status", "unknown"))
+            strategy = str(result.get("strategy", "unknown"))
+            status_counts[status] = status_counts.get(status, 0) + 1
+            strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
+
+        lines.append("### Status")
+        for status, count in sorted(status_counts.items(), key=lambda x: (-x[1], x[0])):
+            lines.append(f"- **{status}**: {count}")
+
+        lines.append("")
+        lines.append("### Strategies")
+        for strategy, count in sorted(strategy_counts.items(), key=lambda x: (-x[1], x[0])):
+            lines.append(f"- **{strategy}**: {count}")
+
+        sample_results = [
+            result for result in extraction_results.values()
+            if result.get("status") == "success"
+        ][:5]
+        if sample_results:
+            lines.append("")
+            lines.append("### Sample Successful Extractions")
+            for result in sample_results:
+                url = result.get("url", "")
+                strategy = result.get("strategy", "unknown")
+                capture_label = result.get("capture_label", "")
+                capture_context = result.get("capture_context", "")
+                summary = result.get("summary", {})
+                context_suffix = (
+                    f" [{capture_context}: {capture_label}]"
+                    if capture_label or capture_context else ""
+                )
+                lines.append(f"- `{url}` via **{strategy}**{context_suffix}: {summary}")
+
+        return "\n".join(lines)
+
     def _artifacts_section(self, state: AgentState, stats: dict) -> str:
         """List generated artifacts."""
         return f"""## Artifacts
 - **inventory.json**: {stats['states_captured']} entries
 - **sitemap.json**: {stats['total_targets']} nodes, {len(state.edges)} edges
 - **run_log.jsonl**: {stats['steps']} steps
-- **analysis/**: per-state analysis files"""
+- **analysis/**: per-state analysis files
+- **vision/**: per-page vision understanding artifacts
+- **page_insights/**: merged DOM + vision page semantics
+- **dataset.jsonl**: per-state structured extraction results
+- **dataset_summary.json**: extraction aggregate statistics
+- **extraction_failures.json**: empty/failed extraction cases"""

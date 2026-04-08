@@ -22,10 +22,15 @@ from src.observer.extractor import CandidateExtractor
 from src.observer.fingerprint import DOMFingerprinter
 from src.observer.novelty import NoveltyScorer
 from src.analyzer.page_analyzer import PageAnalyzer
+from src.analysis.competitive_report import CompetitiveReportGenerator
 from src.artifacts.manager import ArtifactManager
 from src.artifacts.inventory import InventoryGenerator
 from src.artifacts.sitemap import SitemapGenerator
 from src.artifacts.report import ReportGenerator
+from src.extraction.engine import ExtractionEngine
+from src.extraction.types import EvidencePaths
+from src.vision.client import VisionClient
+from src.vision.types import DOMSummary, PageInsight, VisionResult
 
 console = Console()
 
@@ -47,7 +52,10 @@ class ExplorationEngine:
         self.fingerprinter = DOMFingerprinter()
         self.novelty_scorer = NoveltyScorer(self.fingerprinter)
         self.analyzer = PageAnalyzer()
+        self.competitive = CompetitiveReportGenerator()
         self.artifacts = ArtifactManager(config)
+        self.extraction = ExtractionEngine()
+        self.vision = VisionClient(config.vision)
 
         # Logger (created lazily after output is cleared)
         self._logger: RunLogger | None = None
@@ -55,6 +63,9 @@ class ExplorationEngine:
 
         # Analysis results (state_id -> analysis dict)
         self._analysis_results: dict[str, dict] = {}
+        self._vision_results: dict[str, dict] = {}
+        self._page_insights: dict[str, dict] = {}
+        self._extraction_results: dict[str, dict] = {}
 
         # Timing
         self._start_time: str = ""
@@ -117,6 +128,12 @@ class ExplorationEngine:
 
                 # ANALYZE the route page
                 await self._phase_analyze(snapshot)
+                await self._run_extraction(
+                    snapshot,
+                    capture_label=target.label or self._url_to_label(snapshot.url),
+                    capture_context="route",
+                    allow_vision=True,
+                )
 
                 # EXPLORE all interactions on this page (inline, no frontier)
                 if self.state.has_budget():
@@ -189,10 +206,20 @@ class ExplorationEngine:
             candidates, coverage = await self.extractor.extract_all(
                 self.controller.page, self.state.current_target_id, current_depth
             )
+            dom_summary = await self._build_dom_summary()
+            vision_result = await self._understand_current_page(current_url, dom_summary)
+            route_candidates = self._rerank_route_candidates(
+                [c for c in candidates if c.target_type == TargetType.ROUTE], vision_result
+            )
+            insight = self._build_page_insight(current_url, dom_summary, vision_result)
+            self._persist_page_understanding(insight, vision_result)
+
             # Only add ROUTE targets to the frontier
-            route_candidates = [c for c in candidates if c.target_type == TargetType.ROUTE]
             added = self.state.add_targets(route_candidates)
-            ctx["reason"] = f"found {len(route_candidates)} routes, {added} new"
+            ctx["reason"] = (
+                f"found {len(route_candidates)} routes, {added} new, "
+                f"page_type={insight.page_type_vision}"
+            )
 
             if current_target and current_target.id not in self.state.coverage:
                 self.state.coverage[current_target.id] = coverage
@@ -479,6 +506,12 @@ class ExplorationEngine:
         analysis = self.analyzer.analyze(html, computed_styles)
         self._analysis_results[snapshot.id] = analysis
         self.artifacts.save_analysis(snapshot.id, analysis)
+        await self._run_extraction(
+            snapshot,
+            capture_label=label,
+            capture_context=context,
+            allow_vision=False,
+        )
 
         self.logger.log(AgentPhase.EXECUTE, f"capture_{context}", label,
                       "success", f"novelty={novelty:.2f}")
@@ -507,6 +540,61 @@ class ExplorationEngine:
             self.artifacts.save_analysis(snapshot.id, analysis)
             ctx["reason"] = f"components: {', '.join(analysis.get('component_types', []))}"
 
+    async def _run_extraction(
+        self,
+        snapshot: StateSnapshot,
+        capture_label: str = "",
+        capture_context: str = "",
+        allow_vision: bool = True,
+    ) -> None:
+        """Run structured extraction for a captured route page."""
+        html = ""
+        try:
+            html_path = Path(snapshot.html_path)
+            if html_path.exists():
+                html = html_path.read_text(encoding="utf-8")
+        except Exception:
+            html = ""
+
+        if not html:
+            return
+
+        if snapshot.id not in self._page_insights:
+            dom_summary = await self._build_dom_summary()
+            vision_result = (
+                await self._understand_current_page(snapshot.url, dom_summary)
+                if allow_vision else VisionResult()
+            )
+            insight_obj = self._build_page_insight(
+                snapshot.url,
+                dom_summary,
+                vision_result,
+                state_id=snapshot.id,
+            )
+            self._persist_page_understanding(insight_obj, vision_result)
+
+        insight = self._page_insights.get(snapshot.id) or {}
+        strategy = str(insight.get("extraction_strategy", "unknown"))
+        page_type = self._resolved_page_type(insight)
+
+        evidence_paths = EvidencePaths(
+            screenshot=snapshot.screenshot_path,
+            html=snapshot.html_path,
+        )
+
+        result = self.extraction.extract(
+            html=html,
+            state_id=snapshot.id,
+            target_id=snapshot.target_id,
+            url=snapshot.url,
+            page_type=page_type,
+            strategy=strategy,
+            evidence_paths=evidence_paths,
+        )
+        result.capture_label = capture_label
+        result.capture_context = capture_context
+        self._extraction_results[snapshot.id] = result.model_dump()
+
     async def _phase_finalize(self) -> None:
         """FINALIZE: Generate all artifacts and report."""
         self.state.phase = AgentPhase.FINALIZE
@@ -531,12 +619,49 @@ class ExplorationEngine:
             pages_with_gaps = sum(1 for c in self.state.coverage.values() if c.has_unexplored)
             ctx["reason"] = f"{len(coverage_data)} pages, {pages_with_gaps} with gaps → {path.name}"
 
+        with self.logger.timed(AgentPhase.FINALIZE, "generate_extraction_artifacts") as ctx:
+            extraction_rows = list(self._extraction_results.values())
+            summary = self._build_extraction_summary(extraction_rows)
+            failures = [
+                row for row in extraction_rows
+                if row.get("status") in {"failed", "empty"} or row.get("error")
+            ]
+            self.artifacts.save_jsonl("dataset.jsonl", extraction_rows)
+            self.artifacts.save_json("dataset_summary.json", summary)
+            self.artifacts.save_json("extraction_failures.json", failures)
+            ctx["reason"] = (
+                f"{summary['total_results']} results, "
+                f"{summary['successful_results']} successful"
+            )
+
         with self.logger.timed(AgentPhase.FINALIZE, "generate_report") as ctx:
             report = ReportGenerator().generate(
-                self.state, self._start_time, end_time, self._analysis_results
+                self.state,
+                self._start_time,
+                end_time,
+                self._analysis_results,
+                self._page_insights,
+                self._extraction_results,
             )
             path = self.artifacts.save_text("exploration_report.md", report)
             ctx["reason"] = f"report → {path.name}"
+
+        with self.logger.timed(AgentPhase.FINALIZE, "generate_competitive_analysis") as ctx:
+            competitive = self.competitive.generate(
+                self.state,
+                self._analysis_results,
+                self._page_insights,
+                self._extraction_results,
+            )
+            self.artifacts.save_json("competitive_analysis.json", competitive.model_dump())
+            self.artifacts.save_text(
+                "competitive_analysis.md",
+                self.competitive.generate_markdown(competitive),
+            )
+            ctx["reason"] = (
+                f"category={competitive.competitive_summary.product_category_guess}, "
+                f"modules={len(competitive.feature_modules)}"
+            )
 
         stats = self.state.get_stats()
         console.print(Panel.fit(
@@ -549,11 +674,217 @@ class ExplorationEngine:
             f"Artifacts:\n"
             f"  inventory.json, sitemap.json, run_log.jsonl\n"
             f"  exploration_report.md\n"
-            f"  {len(self._analysis_results)} state analyses",
+            f"  {len(self._analysis_results)} state analyses\n"
+            f"  {len(self._page_insights)} page insights\n"
+            f"  {len(self._extraction_results)} extraction results\n"
+            f"  competitive_analysis.json / .md",
             title="Summary",
         ))
 
     # ── Helpers ──
+
+    async def _build_dom_summary(self) -> DOMSummary:
+        """Build a lightweight DOM summary for vision understanding."""
+        title = await self.controller.get_title()
+        html = await self.controller.get_html()
+        analysis = self.analyzer.analyze(html)
+
+        return DOMSummary(
+            title=title,
+            component_types=analysis.get("component_types", []),
+            nav_labels=await self._collect_visible_texts(self.config.exploration.nav_selectors, 8),
+            button_labels=await self._collect_visible_texts(
+                ["button", ".el-button", ".ant-btn", ".btn"], 10
+            ),
+            tab_labels=await self._collect_visible_texts([self.config.interaction.tab_selector], 6),
+            table_headers=await self._collect_visible_texts(
+                ["table th", ".el-table th", ".ant-table th"], 8
+            ),
+            has_modal=await self.controller.is_modal_open(),
+            has_table=self._has_component(analysis, "table"),
+            has_form=self._has_component(analysis, "form"),
+            has_pagination=self._has_component(analysis, "pagination"),
+        )
+
+    async def _understand_current_page(self, current_url: str, dom_summary: DOMSummary) -> VisionResult:
+        """Run vision understanding for the current page if enabled."""
+        if not self.config.vision.enabled:
+            return VisionResult()
+
+        try:
+            screenshot_path = await self.controller.capture_viewport_screenshot("vision_observe", "vision")
+            return await self.vision.understand_page(screenshot_path, current_url, dom_summary)
+        except Exception as e:
+            self.logger.log(AgentPhase.OBSERVE, "vision_understanding", current_url, "failed", str(e))
+            return VisionResult(notes=f"vision_failed: {e}")
+
+    def _rerank_route_candidates(self, route_candidates: list[ExplorationTarget],
+                                 vision_result: VisionResult) -> list[ExplorationTarget]:
+        """Rerank route candidates using page-type hints without changing executability."""
+        page_type = vision_result.page_type
+        if page_type == "unknown" or not route_candidates:
+            return route_candidates
+
+        def score(candidate: ExplorationTarget) -> tuple[int, int, str]:
+            label = candidate.label.lower()
+            score_value = 0
+
+            if page_type == "dashboard":
+                if any(term in label for term in ["list", "manage", "admin", "setting", "config", "user"]):
+                    score_value += 3
+            elif page_type == "list":
+                if any(term in label for term in ["detail", "view", "record", "item"]):
+                    score_value += 2
+                if any(term in label for term in ["report", "analytics", "dashboard"]):
+                    score_value -= 1
+            elif page_type == "detail":
+                if any(term in label for term in ["detail", "view", "profile", "record"]):
+                    score_value += 2
+            elif page_type in {"form", "modal"}:
+                if any(term in label for term in ["create", "new", "edit", "config", "setting"]):
+                    score_value += 2
+
+            return (-score_value, candidate.depth, candidate.label)
+
+        return sorted(route_candidates, key=score)
+
+    def _build_page_insight(self, current_url: str, dom_summary: DOMSummary,
+                            vision_result: VisionResult, state_id: str | None = None) -> PageInsight:
+        """Build a merged page insight from DOM and vision understanding."""
+        insight_state_id = state_id or self.state.current_state_id or f"observe_{self._url_to_label(current_url)}"
+        page_type_dom = self._infer_dom_page_type(dom_summary)
+
+        return PageInsight(
+            state_id=insight_state_id,
+            url=current_url,
+            page_type_dom=page_type_dom,
+            page_type_vision=vision_result.page_type,
+            dom_component_types=dom_summary.component_types,
+            vision_regions=vision_result.regions,
+            interaction_hints=vision_result.interaction_hints,
+            extraction_strategy=self._choose_extraction_strategy(page_type_dom, vision_result.page_type),
+            high_value_page=self._is_high_value_page(dom_summary, vision_result),
+            analysis_tags=self._derive_analysis_tags(dom_summary, vision_result),
+        )
+
+    def _persist_page_understanding(self, insight: PageInsight, vision_result: VisionResult) -> None:
+        """Persist page insight and optional vision output artifacts."""
+        self._page_insights[insight.state_id] = insight.model_dump()
+        self.artifacts.save_page_insight(insight.state_id, insight.model_dump())
+
+        if self.config.vision.enabled:
+            self._vision_results[insight.state_id] = vision_result.model_dump()
+            self.artifacts.save_vision(insight.state_id, vision_result.model_dump())
+
+    async def _collect_visible_texts(self, selectors: list[str], limit: int) -> list[str]:
+        """Collect visible text snippets for a list of selectors."""
+        texts: list[str] = []
+        seen: set[str] = set()
+
+        for selector in selectors:
+            try:
+                locator = self.controller.page.locator(selector)
+                count = await locator.count()
+                for i in range(min(count, limit)):
+                    try:
+                        item = locator.nth(i)
+                        if not await item.is_visible():
+                            continue
+                        text = (await item.text_content() or "").strip()
+                        if not text:
+                            continue
+                        compact = " ".join(text.split())
+                        if len(compact) > 60:
+                            compact = compact[:57] + "..."
+                        if compact not in seen:
+                            seen.add(compact)
+                            texts.append(compact)
+                        if len(texts) >= limit:
+                            return texts
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+
+        return texts
+
+    def _has_component(self, analysis: dict, component_name: str) -> bool:
+        """Return True if a component type is present in analyzer output."""
+        return component_name in analysis.get("component_types", [])
+
+    def _infer_dom_page_type(self, summary: DOMSummary) -> str:
+        """Infer a coarse page type from DOM summary only."""
+        components = set(summary.component_types)
+        if summary.has_modal:
+            return "modal"
+        if "table" in components:
+            return "list"
+        if "form" in components:
+            return "form"
+        if "tabs" in components and "table" not in components:
+            return "detail"
+        if "card" in components and "table" not in components and "form" not in components:
+            return "dashboard"
+        return "unknown"
+
+    def _choose_extraction_strategy(self, page_type_dom: str, page_type_vision: str) -> str:
+        """Choose the provisional extraction strategy for a page."""
+        page_type = page_type_vision if page_type_vision != "unknown" else page_type_dom
+        if page_type == "list":
+            return "list_table"
+        if page_type == "detail":
+            return "detail_fields"
+        if page_type in {"form", "modal"}:
+            return "form_schema"
+        return "unknown"
+
+    def _is_high_value_page(self, summary: DOMSummary, vision_result: VisionResult) -> bool:
+        """Determine whether a page is high-value for future extraction."""
+        region_types = {region.region_type for region in vision_result.regions}
+        if {"filter_bar", "table", "pagination"}.issubset(region_types):
+            return True
+        return summary.has_table or vision_result.page_type == "list"
+
+    def _resolved_page_type(self, insight: dict) -> str:
+        """Resolve page type with explicit fallback from vision to DOM."""
+        page_type_vision = str(insight.get("page_type_vision") or "").strip()
+        if page_type_vision and page_type_vision != "unknown":
+            return page_type_vision
+        page_type_dom = str(insight.get("page_type_dom") or "").strip()
+        return page_type_dom or "unknown"
+
+    def _derive_analysis_tags(self, summary: DOMSummary, vision_result: VisionResult) -> list[str]:
+        """Derive high-level analysis tags from page understanding."""
+        tags: list[str] = []
+        if summary.has_table:
+            tags.append("data_dense")
+        if summary.has_form or vision_result.page_type in {"form", "modal"}:
+            tags.append("configuration_surface")
+        if any(region.region_type == "tabs" for region in vision_result.regions):
+            tags.append("tabbed_workflow")
+        if self._is_high_value_page(summary, vision_result):
+            tags.append("high_value")
+        return tags
+
+    def _build_extraction_summary(self, extraction_rows: list[dict]) -> dict[str, int]:
+        """Build summary stats for extraction artifacts."""
+        strategy_counts: dict[str, int] = {}
+        successful_results = 0
+
+        for row in extraction_rows:
+            strategy = str(row.get("strategy", "unknown"))
+            strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
+            if row.get("status") == "success":
+                successful_results += 1
+
+        return {
+            "total_results": len(extraction_rows),
+            "successful_results": successful_results,
+            "empty_results": sum(1 for row in extraction_rows if row.get("status") == "empty"),
+            "failed_results": sum(1 for row in extraction_rows if row.get("status") == "failed"),
+            "skipped_results": sum(1 for row in extraction_rows if row.get("status") == "skipped"),
+            "strategies": strategy_counts,
+        }
 
     async def _navigate_to_target(self, target: ExplorationTarget) -> bool:
         """Navigate to a route target by URL or click."""

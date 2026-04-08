@@ -34,3 +34,11 @@ login:
 #   viewport_width: 1920
 #   viewport_height: 1080
 #   slow_mo: 200                   # ms between actions, reduce for speed
+
+# vision:
+#   enabled: true                  # Requires API credentials
+#   provider: "openai"
+#   model: "gpt-4.1-mini"
+#   api_base_url: "https://api.openai.com/v1"
+#   api_key_env: "OPENAI_API_KEY"
+#   timeout_ms: 15000
