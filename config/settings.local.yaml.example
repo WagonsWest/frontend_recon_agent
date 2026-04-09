@@ -23,12 +23,20 @@ task:
   profile_company: "Example Inc"
 
 login:
+  mode: "login"  # public | login | register | auto
   username: "your_username"
   password: "your_password"
+  # register_url: "https://your-website.com/signup"
+  # register_link_selector: "a:has-text('Sign up')"
   # Uncomment and modify if defaults don't match your site:
   # username_selector: "input[type='text'], input[name='username']"
   # password_selector: "input[type='password']"
   # submit_selector: "button[type='submit'], button:has-text('Login')"
+  # registration_email_selector: "input[type='email']"
+  # registration_password_selector: "input[name='password']"
+  # registration_submit_selector: "button[type='submit']"
+  # verification_code_selector: "input[autocomplete='one-time-code'], input[name*='code']"
+  # verification_submit_selector: "button:has-text('Verify'), button:has-text('Continue')"
 
 # --- Optional overrides (defaults in settings.yaml are usually fine) ---
 
@@ -47,7 +55,7 @@ login:
 #   novelty_threshold: 0.12       # 0.0-1.0, lower = capture more
 
 # browser:
-#   headless: false                # Set true for CI/server environments
+#   headless: false                # Keep visible for manual auth / verification assistance
 #   viewport_width: 1920
 #   viewport_height: 1080
 #   slow_mo: 200                   # ms between actions, reduce for speed
@@ -67,3 +75,6 @@ login:
 #   api_base_url: "https://api.openai.com/v1"
 #   api_key_env: "OPENAI_API_KEY"
 #   timeout_ms: 20000
+# 
+# run:
+#   profile: "demo"                # default | smoke_fast | demo | full

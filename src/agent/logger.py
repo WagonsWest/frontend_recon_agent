@@ -33,6 +33,7 @@ class RunLogger:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._file = open(self._path, "w", encoding="utf-8")
         self._step = 0
+        self._entries: list[RunLogEntry] = []
 
     def log(self, phase: AgentPhase, action: str, target: str,
             result: str, reason: str, duration_ms: int = 0) -> RunLogEntry:
@@ -49,6 +50,7 @@ class RunLogger:
         )
         self._file.write(json.dumps(asdict(entry), ensure_ascii=False) + "\n")
         self._file.flush()
+        self._entries.append(entry)
         return entry
 
     @contextmanager
@@ -73,3 +75,25 @@ class RunLogger:
     @property
     def step_count(self) -> int:
         return self._step
+
+    def summary(self) -> dict:
+        """Return aggregate timing stats by phase and action."""
+        phase_stats: dict[str, dict[str, int]] = {}
+        action_stats: dict[str, dict[str, int]] = {}
+
+        for entry in self._entries:
+            phase_bucket = phase_stats.setdefault(entry.phase, {"count": 0, "duration_ms": 0})
+            phase_bucket["count"] += 1
+            phase_bucket["duration_ms"] += entry.duration_ms
+
+            action_key = f"{entry.phase}:{entry.action}"
+            action_bucket = action_stats.setdefault(action_key, {"count": 0, "duration_ms": 0})
+            action_bucket["count"] += 1
+            action_bucket["duration_ms"] += entry.duration_ms
+
+        return {
+            "total_steps": self._step,
+            "total_duration_ms": sum(entry.duration_ms for entry in self._entries),
+            "by_phase": phase_stats,
+            "by_action": action_stats,
+        }

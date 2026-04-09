@@ -21,6 +21,463 @@
 - The project is well-suited to admin/SaaS/backoffice environments
 - DOM fingerprinting and novelty scoring already reduce redundant captures
 - The current codebase is more explainable and reproducible than prompt-first browser agents
+- The codebase now also has a credible single-site public-web competitive-analysis demo path
+
+## 2026-04-09 Leader Follow-Up: Demo Requirements Assessment
+
+### 1. Decision rationale as a first-class output
+- This is a good requirement and fits the current stage of the project
+- The repo already contains planning artifacts, but architectural rationale is still scattered across:
+  - `DISCUSSION_BRIEF.md`
+  - planning files
+  - code comments / naming
+- Current gap:
+  - there is no stable ADR-style location that says:
+    - what we chose
+    - why
+    - why not the main alternative
+- Assessment:
+  - we should add this before more demo-scope expansion, otherwise later design choices will look ad hoc
+
+### 2. Stay focused on competitive analysis
+- This is directionally correct and should sharpen the demo
+- The current project has two identities:
+  - internal architecture identity: general browser agent with evidence outputs
+  - external demo identity: competitive-analysis system
+- Assessment:
+  - external framing should now bias toward the second one
+  - general browser-agent capability should be described as an enabling mechanism, not the main product story
+
+### 3. Three access modes must all exist
+- Requested demo scope:
+  - no login
+  - account login
+  - email registration then login / entry
+- Current implementation status:
+  - public / no-login: implemented
+  - existing-account login: implemented in a simple selector-driven form
+  - email registration: not implemented as a first-class flow
+- Assessment:
+  - this is the most important functional gap relative to the requested demo scope
+  - the current authenticator is login-only and has no registration planner, no email verification abstraction, and no access-mode state machine
+
+### 4. Multi-site runs in parallel
+- Current runtime model:
+  - one CLI invocation
+  - one config
+  - one `ExplorationEngine`
+  - one browser context / page
+- Assessment:
+  - true multi-target competitive-analysis orchestration is not implemented
+  - the cleanest near-term shape is parallel independent engines, not a single shared engine that interleaves websites
+- Rationale:
+  - sites are independent tasks
+  - outputs are already site-scoped
+  - failure isolation is better
+  - final comparison can be a separate aggregation phase
+
+### 5. Selective screenshots and image-rich final reports
+- Current screenshot behavior:
+  - route captures always produce screenshots
+  - interaction captures produce screenshots when novelty is high enough to capture
+  - reports currently summarize in text only and do not embed images
+- Assessment:
+  - the capture substrate already exists
+  - the missing layer is screenshot selection, captioning, and markdown placement
+- Strong opportunity:
+  - this is one of the highest-leverage demo upgrades because it makes the output look materially closer to a human-written competitive report without weakening evidence traceability
+
+### Overall product judgment
+- The current codebase is already good enough to support a convincing single-site public competitive-analysis demo
+- It is not yet good enough to claim full demo readiness against the latest requested scope because the following are still missing:
+  - first-class registration flow
+  - multi-site parallel orchestration
+  - image-rich report composition
+  - explicit decision-rationale artifacts
+
+## 2026-04-09 Report Productization Pass
+
+### What was implemented
+- Added a new deterministic readable-report generator:
+  - `src/analysis/readable_report.py`
+- Wired finalization to emit:
+  - `competitive_analysis_readable.md`
+- Added screenshot metadata to captured states so reports can reason about:
+  - route vs interaction context
+  - capture label
+- Added a smoke-test config with synthesis disabled:
+  - `config/smoke_test_public_nosynth.yaml`
+- Added an ADR file:
+  - `ARCHITECTURE_DECISIONS.md`
+
+### What the new report does
+- Writes a more stakeholder-facing narrative layer
+- Embeds selected screenshots directly into markdown
+- Chooses images using:
+  - novelty
+  - page-type diversity
+  - extraction evidence density
+  - high-value page hints
+- Keeps structured and synthesized outputs intact instead of replacing them
+
+### Validation result
+- A public smoke rerun against `python.org` completed successfully outside the sandbox with:
+  - 6 captured states
+  - 12 discovered targets
+  - `competitive_analysis_readable.md` generated successfully
+- The generated report now includes real markdown image embeds such as:
+  - homepage
+  - docs page
+  - community page
+  - downloads page
+  - documentation page
+
+### Residual gap after this pass
+- The readable report is materially better, but still only a first productized version
+- Remaining quality work includes:
+  - better narrative flow
+  - stronger per-workflow storytelling
+  - cleaner text normalization / mojibake cleanup
+  - richer comparison framing once multi-site orchestration exists
+
+## 2026-04-09 Report Image Strategy Upgrade
+
+### What changed
+- Reports no longer blindly reuse the same archival full-page screenshot everywhere
+- Captures now preserve:
+  - an archival full-page screenshot
+  - a report-oriented screenshot path
+- Current strategy:
+  - homepage / root route may keep a full-page report image
+  - most other report images now use viewport-style screenshots
+
+### Why this is better
+- Full-page screenshots are still useful for audit and archive
+- But they are often poor inline report visuals on long pages
+- Viewport-oriented report images are easier to read and feel closer to human-written competitive-analysis decks
+
+### Validation result
+- A public smoke rerun against `python.org` generated report images such as:
+  - `root_route_report.png`
+  - `Community_route_report.png`
+  - `Docs_route_report.png`
+- The homepage report image stayed full-page, while other pages shifted to report-oriented variants with smaller image sizes
+
+## 2026-04-09 Batch Orchestration Pass
+
+### What changed
+- Added batch config loading and concurrent site execution
+- Added:
+  - `src/agent/batch_runner.py`
+  - `src/analysis/comparison_report.py`
+  - `config/smoke_test_batch.yaml`
+- Batch outputs now include:
+  - isolated per-site artifacts
+  - isolated per-site readable reports
+  - batch-level `comparison_report.md`
+
+### Validation result
+- A tiny two-site batch run completed successfully:
+  - `python_main`
+  - `python_docs`
+- The batch generated:
+  - per-site reports under `output/batch/python_compare/sites/...`
+  - `output/batch/python_compare/reports/comparison_report.md`
+
+### Current limitation
+- The comparison report is intentionally first-pass:
+  - score-oriented
+  - module-oriented
+  - strength/gap oriented
+- It is not yet a polished analyst-style compare narrative
+
+## 2026-04-09 Registration Access Pass
+
+### What changed
+- Added a first-pass access-mode model in the authenticator:
+  - `public`
+  - `login`
+  - `register`
+  - `auto`
+- Added config support for:
+  - registration URL
+  - optional signup-entry selector
+  - registration field selectors
+  - registration submit selector
+  - registration success indicator
+- Added a local mock registration site and smoke config for validation
+
+### Validation status
+- The implementation compiles and the local mock site is reachable from shell (`200`)
+- However, the Playwright browser run still failed to reach the localhost registration target during the escalated smoke run
+- So the current status is:
+  - first-pass registration logic: implemented
+  - end-to-end browser validation on the mock target: still blocked / incomplete
+
+### Rationale refresh
+- Choosing exactly `public` / `login` / `register` is justified for the current
+  demo because those are the explicitly requested access paths.
+- Keeping the first pass selector-driven is also justified for now because it
+  fits the current deterministic Playwright runtime and keeps behavior auditable.
+- What is not yet strongly justified:
+  - treating selector-driven registration as a durable long-term strategy
+  - treating localhost mock coverage as proof that registration works in a
+    realistic environment
+- Conclusion:
+  - the current implementation is valid as a demo-scoped first pass
+  - it is not yet valid as a settled architecture for broader onboarding support
+
+## 2026-04-09 Manual Verification First Pass
+
+### What changed
+- Registration no longer treats verification-only states as immediate terminal failure
+- The authenticator now detects likely verification / OTP steps and can pause for
+  human assistance
+- Current supported operator behaviors:
+  - type the verification code into the terminal so the agent fills it
+  - complete the step manually in the visible browser and press Enter to resume
+- Browser execution is now forced to stay visible for these interactive auth flows
+
+### Why this is the right first move
+- It closes the practical gap between "submitted the signup form" and "actually
+  entered the product" without taking on mailbox automation yet
+- It is a more valid first proof point than pretending email registration works
+  while ignoring verification entirely
+
+### Remaining limitation
+- This is still human-assisted verification, not mailbox-backed automation
+- It should be treated as the first verification provider, not the final answer
+
+## 2026-04-09 Additional Scope Clarification
+
+### Human-readable reporting is still a major gap
+- Strictly speaking, the repo already generates reports:
+  - `exploration_report.md`
+  - `competitive_analysis.md`
+  - `competitive_analysis_structured.md`
+- But these are still closer to engineering summaries than final human-facing competitive-analysis deliverables
+- Current evidence:
+  - `exploration_report.md` is run-centric and operational
+  - `competitive_analysis.md` is structured and useful, but still reads like an extracted artifact summary rather than a polished analyst report
+- Assessment:
+  - "there is no human-readable report yet" is directionally fair if the benchmark is something a manager or product stakeholder would willingly read end to end
+  - report generation now needs its own product-quality workstream, not just incremental markdown tweaks
+
+### `max_states=6` is smoke-test scale only
+- The recent public validation used `max_states=6` because it was a bounded smoke test, not because it is a realistic competitive-analysis budget
+- Current defaults already use a much higher ceiling in config (`max_states = 100`)
+- Assessment:
+  - future demo and benchmark runs should use materially larger budgets
+  - planning and reporting should distinguish:
+    - smoke-test budgets
+    - demo budgets
+    - full benchmark budgets
+
+### Longer runs create a real runtime bottleneck
+- The current runtime is effectively single-threaded for one site:
+  - one browser context
+  - one active page
+  - frontier + pending decisions processed in one loop
+  - interaction exploration performed inline on the current page
+- The browser controller also closes newly opened tabs/popups immediately, so the current architecture is intentionally centered on one active page at a time
+- Assessment:
+  - increasing `max_states` will increase wall-clock time roughly linearly enough that it becomes noticeable in demos
+  - this makes runtime strategy an actual product decision, not just a performance tuning detail
+
+### Should one site explore multiple pages in parallel?
+- Short answer:
+  - eventually maybe yes
+  - immediately, probably not as the first optimization
+- Why not first:
+  - shared per-site memory and budget accounting become harder
+  - duplicate-route and duplicate-state suppression become more complex under concurrency
+  - interaction side effects can interfere across authenticated sessions
+  - evidence ordering and reproducibility degrade if we parallelize too early
+- Better near-term path:
+  - first strengthen report quality
+  - then use higher but bounded demo budgets
+  - then add per-site latency measurement
+  - only after that consider bounded intra-site concurrency, likely at route level rather than arbitrary interaction level
+
+### Recommended stance on intra-site concurrency
+- For now:
+  - keep one site = one main control loop
+  - allow multi-site concurrency first
+- Next performance step after that:
+  - evaluate a bounded worker model where already-discovered independent route targets can be explored in parallel browser contexts
+- Explicit non-goal for the first demo-quality upgrade:
+  - do not parallelize page-local interactions, modal flows, or auth/onboarding substeps within the same site yet
+
+## 2026-04-09 Run Profile Separation
+
+### What changed
+- Added a first-pass `run` config layer with named profiles:
+  - `default`
+  - `smoke_fast`
+  - `demo`
+  - `full`
+- Added CLI support through `--profile`
+- Added:
+  - navigation strategy control
+  - page-action planning toggle
+  - interaction exploration toggle
+  - extraction toggle
+  - report-screenshot toggle
+  - timing-summary toggle
+
+### Why this matters
+- This directly addresses the earlier problem that smoke, demo, and full analysis were sharing one heavy path
+- The system can now run fast validation passes without paying for:
+  - vision
+  - re-observation
+  - extraction
+  - page-local interaction exploration
+  - report-specific screenshot capture
+
+### Validation result
+- A real `smoke_fast` rerun against `python.org` completed in roughly 17-24 seconds rather than minutes
+- It captured 4 states, skipped extraction entirely, and still emitted:
+  - `exploration_report.md`
+  - `competitive_analysis.json`
+  - `competitive_analysis_readable.md`
+  - `run_timing_summary.json`
+
+### Timing insight from the new summary
+- The new timing artifact showed that in the fast profile the dominant costs were still:
+  - `observe:extract_candidates`
+  - `execute:navigate`
+  - `authenticate:login` / access entry
+- Finalization became negligible once synthesis, extraction, and heavier report work were removed
+
+### Rationale refresh
+- This change is well justified because the main problem was conceptual as much
+  as technical:
+  - smoke, demo, and full analysis had drifted into one shared heavy path
+- Profile separation is more valid than changing only `max_states` because the
+  expensive work is not only frontier size:
+  - extraction
+  - report screenshot capture
+  - re-observation
+  - vision
+- The timing summary is also justified because it converts vague performance
+  complaints into inspectable artifacts.
+- Remaining limitation:
+  - `smoke_fast` is useful for health checks, but it must not be used as proof
+    that demo-time evidence quality is sufficient
+
+## 2026-04-09 Justification Refresh For The Latest Changes
+
+### Readable report and image strategy
+- Strongly justified:
+  - a deterministic stakeholder-facing report is a better demo fit than relying
+    only on synthesis output
+  - archival full-page screenshots plus report-oriented viewport screenshots is
+    a valid split between auditability and readability
+- Only partially justified:
+  - novelty is currently a structural DOM-difference signal, not a direct measure
+    of visual quality or analytical importance
+- Follow-up needed:
+  - compare screenshot usefulness against a small human-judged sample
+
+### Multi-site orchestration and comparison
+- Strongly justified:
+  - separate site runs with post-run comparison match the user request cleanly
+  - isolated runs preserve artifact ownership and failure isolation
+- Only partially justified:
+  - the current comparison report shape is still a first-pass summary rather
+    than a proven human-friendly competitive-comparison deliverable
+- Follow-up needed:
+  - use real human-written comparison memos as the benchmark for the next pass
+
+### Temporary technical choices that should be treated as provisional
+- local mock registration target
+- selector-driven registration as the sole onboarding mechanism
+- novelty-weighted screenshot ranking without human calibration
+- first-pass comparison report structure without external report benchmarking
+
+## 2026-04-09 ArtificialAnalysis.ai Validation
+
+### What happened
+- A first visible-browser run against `https://artificialanalysis.ai/` paused after the
+  initial capture because the anti-bot detector matched `cloudflare` text on the page
+- A second run with `captcha_policy = ignore` showed the site was actually accessible
+  and produced 5 captured states:
+  - homepage
+  - hardware benchmark
+  - AI trends
+  - login
+  - an unintended `Terms-of-Use.pdf` transition
+
+### What this validates
+- The broader competitive-analysis stack works on this public Next.js site:
+  - readable report
+  - screenshots
+  - evidence extraction
+  - page typing
+- The first pause was likely a false positive from challenge detection, not a hard
+  browser access failure
+
+### New weaknesses exposed
+- The anti-bot detector is currently too eager when `cloudflare` appears in page text
+- Auth/onboarding CTA planning is still too coarse:
+  - on the login page it selected a `Continue` action that led to a legal PDF instead
+    of a meaningful next product step
+
+### Implication
+- This site is useful as a public-surface validation target
+- It is not yet a clean proof target for the email-registration workflow we want to
+  validate next
+
+## 2026-04-09 ArtificialAnalysis.ai Auth Follow-Up
+
+### What we changed
+- Upgraded the authenticator so `register` and `login` can handle unified
+  email-entry auth pages instead of assuming email+password are visible on the
+  first screen
+- Tightened auth-page action planning so public exploration no longer clicks
+  generic `Continue` actions inside auth pages or legal links nearby
+- Added a site-specific register smoke config for `artificialanalysis.ai`
+
+### What the live auth diagnostic showed
+- This site uses a magic-link style email flow rather than an OTP box:
+  - after submitting the email field, the page shows
+    `A login link has been sent ... Please check your inbox`
+- That means it belongs to an important subclass of email auth:
+  - unified login/signup entry
+  - email submit first
+  - verification continues through inbox link rather than inline code input
+
+### Current status
+- The runtime now correctly recognizes this as a verification step and pauses
+  for human assistance instead of falsely claiming auth success
+- This is enough to say the project now supports the first-pass operator flow
+  for this class of site:
+  - submit email
+  - detect magic-link verification
+  - wait for manual inbox action
+  - optionally accept a pasted verification URL / magic link back into the terminal
+  - continue in the same visible browser session
+
+### Remaining gap
+- We still need a real end-to-end run with a usable inbox so the post-link
+  continuation into the product can be validated fully
+
+### Real magic-link continuation result
+- We attempted a direct continuation run using a real magic link supplied from
+  the mailbox
+- The site redirected to a login URL carrying `error=INVALID_TOKEN`
+- Interpretation:
+  - the link itself had already expired or been consumed
+  - the current blocker was token validity, not the newly added continuation path
+
+### Recommended sequencing
+- Do not treat all five requests as equal-sized polish items
+- The dependency order is:
+  1. tighten product framing and rationale discipline
+  2. implement access-mode model including registration
+  3. add multi-site orchestration
+  4. upgrade report composition with selected screenshots
+  5. evaluate against human-written reports
 
 ### Current gap relative to the new goal
 - The system now outputs competitive-analysis artifacts, but live validation with a real vision provider is still pending
@@ -529,3 +986,35 @@
   - observed strengths and gaps
   - key differentiators
 - Current implementation is heuristic but already produces structured outputs suitable for iteration
+
+## ArtificialAnalysis Public-Surface Follow-Up
+- Increasing `max_states` alone did not expand coverage on `artificialanalysis.ai`
+- A visible-browser public run with `--max-states 16 --max-depth 2` still captured only 4 states before the frontier emptied
+- The limiting factor appears to be candidate discovery rather than capture budget
+- Current extractor behavior on this site class is likely missing:
+  - trigger-revealed navigation
+  - button-led route transitions
+  - richer menu surfaces beyond obvious anchor links
+- Practical implication:
+  - for public competitive-analysis depth on modern marketing/content sites, route extraction heuristics are now a higher-priority bottleneck than simply raising the state budget
+- Root-cause detail for `artificialanalysis.ai`:
+  - the homepage DOM contains many internal public links beyond the 4 discovered routes, including:
+    - `/models/...`
+    - `/evaluations/...`
+    - `/image/...`
+    - `/video/...`
+    - `/text-to-speech/...`
+    - `/articles`
+    - `/methodology`
+    - `/faq`
+    - `/contact`
+  - current shared route extraction only scans `nav/sidebar`-style selectors from `ExplorationConfig.nav_selectors`
+  - there is no generic extractor for high-value internal anchors in main content regions
+  - therefore the frontier is currently biased toward top-nav items and misses many public sub-entrances embedded in cards, tables, benchmark sections, and editorial modules
+- Follow-up after broadening route discovery:
+  - the new extractor was able to surface 14 routes on the homepage, so the original missing-entrance diagnosis was correct
+  - however, public exploration is still vulnerable to a separate planner bug:
+    - generic form submission can fire on non-auth pages when visible inputs plus submit-like buttons are present
+  - on `artificialanalysis.ai` this manifested as an unintended `Submit a prompt` action on the public homepage, which navigated into `/image/arena`
+  - practical implication:
+    - wider route discovery is valid, but public-route analysis must keep generic form submission tightly gated or it will create avoidable anti-bot/challenge risk

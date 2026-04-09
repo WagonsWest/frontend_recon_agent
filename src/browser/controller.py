@@ -35,8 +35,14 @@ class BrowserController:
 
     async def start(self) -> None:
         self._playwright = await async_playwright().start()
+        headless = bool(self.config.browser.headless)
+        if headless:
+            console.print(
+                "[yellow]Visible browser mode is enforced for interactive auth and verification; overriding headless=true.[/yellow]"
+            )
+        headless = False
         self._browser = await self._playwright.chromium.launch(
-            headless=self.config.browser.headless,
+            headless=headless,
             slow_mo=self.config.browser.slow_mo,
         )
         self._context = await self._browser.new_context(
@@ -72,7 +78,8 @@ class BrowserController:
     async def goto(self, url: str, timeout: int = 30000) -> bool:
         """Navigate to URL. Returns True on success."""
         try:
-            await self.page.goto(url, wait_until="networkidle", timeout=timeout)
+            wait_until = self.config.run.navigation_wait_until or "networkidle"
+            await self.page.goto(url, wait_until=wait_until, timeout=timeout)
             await asyncio.sleep(self.config.crawl.wait_for_spa / 1000)
             return True
         except PwTimeout:
@@ -263,7 +270,6 @@ class BrowserController:
                     'verification required',
                     'unusual traffic',
                     'press and hold',
-                    'cloudflare',
                     'are you human',
                     'security check'
                 ];

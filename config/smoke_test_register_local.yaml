@@ -1,0 +1,46 @@
+target:
+  url: "http://127.0.0.1:8010/index.html"
+  dashboard_url: ""
+
+task:
+  goal: "Register for the site and understand the initial product surface."
+  goal_keywords:
+    - "dashboard"
+    - "docs"
+    - "pricing"
+  allow_registration_flows: true
+  allow_login_flows: false
+  captcha_policy: "pause_and_report"
+  human_assistance_allowed: true
+  use_site_memory: true
+  validate_action_outcomes: true
+  reobserve_on_state_change: true
+  use_vision_on_state_change: false
+  max_reobservations_per_run: 8
+  profile_name: "Demo User"
+  profile_email: "demo@example.com"
+  profile_password: "DemoPassword123!"
+  profile_company: "Demo Co"
+
+login:
+  mode: "register"
+  username: ""
+  password: ""
+
+budget:
+  max_states: 2
+  max_depth: 1
+  retry_limit: 1
+  novelty_threshold: 0.05
+
+browser:
+  headless: true
+  viewport_width: 1440
+  viewport_height: 900
+  slow_mo: 50
+
+vision:
+  enabled: false
+
+synthesis:
+  enabled: false

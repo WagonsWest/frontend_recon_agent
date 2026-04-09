@@ -337,9 +337,11 @@ class ReportGenerator:
 - **inventory.json**: {stats['states_captured']} entries
 - **sitemap.json**: {stats['total_targets']} nodes, {len(state.edges)} edges
 - **run_log.jsonl**: {stats['steps']} steps
+- **run_timing_summary.json**: aggregated timing by phase and action
 - **analysis/**: per-state analysis files
 - **vision/**: per-page vision understanding artifacts
 - **page_insights/**: merged DOM + vision page semantics
 - **dataset.jsonl**: per-state structured extraction results
 - **dataset_summary.json**: extraction aggregate statistics
-- **extraction_failures.json**: empty/failed extraction cases"""
+- **extraction_failures.json**: empty/failed extraction cases
+- **competitive_analysis_readable.md**: stakeholder-facing competitive analysis"""

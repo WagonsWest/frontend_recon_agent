@@ -289,3 +289,176 @@
   - previous weak point `content_section_count = 0` improved to `content_section_count = 10`
   - evidence now includes both top-level docs groups and individual docs index entries
   - remaining issue shifted from "missing sections" to "CTA/doc-nav role overlap"
+- Re-read the codebase after the latest leader-facing scope update and assessed the requested demo gaps against current implementation
+- Recorded a new Phase 11 focused on demo-oriented competitive-analysis hardening:
+  - rationale / ADR discipline
+  - competitive-analysis-first framing
+  - three access modes including email registration
+  - multi-site parallel orchestration
+  - screenshot selection and image-rich reports
+  - evaluation against human-written reports
+- Confirmed current readiness by requirement:
+  - public no-login flow: ready
+  - existing-account login: first-pass ready
+  - email registration flow: missing
+  - parallel multi-site execution: missing
+  - screenshot embedding in final reports: missing
+- Added two more scope conclusions after follow-up discussion:
+  - current markdown outputs are still engineering-facing summaries rather than strong human-readable competitive-analysis deliverables
+  - `max_states=6` should be treated only as smoke-test scale, not a realistic demo budget
+- Assessed runtime scaling implications:
+  - single-site execution is intentionally single-threaded today
+  - multi-site concurrency should be prioritized before intra-site concurrency
+  - if intra-site concurrency is later added, it should likely start with bounded parallel route exploration rather than parallel page-local interactions
+- Implemented the first readable-report productization pass:
+  - added `src/analysis/readable_report.py`
+  - added screenshot-aware report generation in finalization
+  - added capture metadata to route and interaction snapshots
+  - added `competitive_analysis_readable.md` as a new output artifact
+- Added `ARCHITECTURE_DECISIONS.md` to capture rationale and rejected alternatives for:
+  - human-readable reporting
+  - budget tiers
+  - concurrency sequencing
+  - screenshot selection
+- Added `config/smoke_test_public_nosynth.yaml` so report-generation smoke tests can run without final synthesis latency
+- Re-verified the codebase with `python -m compileall src`
+- Re-ran the public smoke test outside the sandbox with synthesis disabled
+  - browser run completed successfully
+  - 6 states were captured
+  - the new readable report was generated with embedded screenshot markdown
+- Upgraded the report-image strategy:
+  - archival captures remain full-page
+  - report-oriented screenshot paths now prefer viewport-style images for most pages
+  - root/home captures may still use a full-page report image
+- Re-ran a smaller public smoke test to verify the new image policy
+  - `competitive_analysis_readable.md` now points at `*_report.png` assets
+  - non-home report images are smaller viewport-style variants
+- Implemented first-pass multi-site orchestration:
+  - added `src/agent/batch_runner.py`
+  - added `src/analysis/comparison_report.py`
+  - added `--batch-config` CLI support
+  - added `config/smoke_test_batch.yaml`
+- Verified the batch path with a tiny two-site concurrent run
+  - both site runs completed successfully
+  - per-site outputs were isolated under `output/batch/python_compare/sites/...`
+  - a batch-level `comparison_report.md` was generated successfully
+- Implemented first-pass registration-mode support in `src/browser/authenticator.py`
+  - added `public`, `login`, `register`, and `auto` access modes
+  - added registration selectors and registration URL config fields
+- Added local mock registration fixtures under `mock_sites/register_demo/`
+- Attempted an end-to-end registration smoke test against the local mock site
+  - shell-level HTTP reachability succeeded
+  - Playwright still failed to reach the localhost target during the escalated browser run
+  - registration logic is implemented, but browser-level validation is still incomplete
+- Implemented run-profile separation:
+  - added `RunConfig` plus `apply_run_profile(...)`
+  - added `--profile` CLI support
+  - added `smoke_fast`, `demo`, and `full` behavior presets
+  - wired navigation strategy, page-action planning, interaction exploration, extraction, and report-screenshot capture to the profile layer
+- Added `run_timing_summary.json` via `RunLogger.summary()`
+- Added `config/smoke_test_public_fast.yaml` as a fast validation profile example
+- Ran a real `smoke_fast` validation against `python.org`
+  - run completed successfully in roughly 17-24 seconds
+  - 4 route states were captured
+  - extraction stayed disabled by profile
+  - timing summary showed the main remaining costs were observe + navigate, not finalization
+- Completed a bigger-picture status review after the latest implementation burst
+  - clearly separated:
+    - already-shipped demo capabilities
+    - partially implemented but not yet validated areas
+    - highest-priority next work
+  - current practical status:
+    - human-readable reporting with selected screenshots: shipped
+    - batch multi-site execution and first-pass comparison report: shipped
+    - access-mode model with registration path: implemented first pass, validation still incomplete
+    - run-profile separation and timing summaries: shipped
+  - highest-priority remaining work now looks like:
+    - real-world validation for registration mode on a controllable external target
+    - stronger analyst-style comparison reporting
+    - evaluation workflow against human-written competitive-analysis reports
+- Refreshed the decision log and planning records so recent shipped changes now
+  include explicit rationale and rejected alternatives
+  - expanded `ARCHITECTURE_DECISIONS.md` with ADRs for:
+    - demo-scoped access modes
+    - independent multi-site concurrency with post-run comparison
+    - runtime profiles plus timing summaries
+  - clarified that screenshot selection currently uses novelty only as one input,
+    not as a full measure of report importance
+  - recorded weakly justified technical choices that should be treated as
+    provisional:
+    - localhost mock registration as a proof target
+    - selector-driven registration as the long-term onboarding model
+    - novelty-weighted screenshot ranking without human calibration
+    - first-pass comparison report structure without human-report benchmarking
+- Implemented a first-pass human-assisted verification flow in the authenticator
+  - registration now detects likely OTP / verification steps
+  - the run can pause for terminal code entry or manual completion in the visible browser
+  - verification no longer has to be treated as immediate registration failure
+- Enforced visible browser operation during interactive auth/testing
+  - `--headless` is now treated as deprecated/ignored for this workflow
+- Ran a new visible-browser validation against `https://artificialanalysis.ai/`
+  - first run paused immediately because the anti-bot detector matched `cloudflare` text
+  - second run with `captcha_policy = ignore` proved the site was actually reachable and yielded 5 captured states:
+    - home
+    - hardware benchmark
+    - AI trends
+    - login
+    - an accidental `Terms-of-Use.pdf` transition
+  - strongest new product insight:
+    - the current anti-bot detector is too eager for this site and can produce false-positive pauses
+  - strongest new runtime issue:
+    - auth-page CTA planning is still too naive and can click a `Continue` action that navigates to a legal PDF instead of a meaningful onboarding step
+- Implemented a follow-up auth pass for `artificialanalysis.ai`-style unified auth pages
+  - `register` / `login` can now advance through email-entry-first auth steps
+  - auth-page public exploration no longer plans generic `Continue` clicks or nearby legal-link misclicks
+  - plain `cloudflare` text is no longer enough to trigger anti-bot pause
+- Added `config/smoke_test_artificialanalysis_register.yaml`
+- Ran a direct auth diagnostic against `artificialanalysis.ai/login?...`
+  - confirmed the page is `Log in or sign up`
+  - confirmed email submit leads to a magic-link state:
+    - `A login link has been sent... Please check your inbox`
+  - confirmed the runtime now recognizes that state as verification-required and pauses for manual assistance
+  - also fixed retry behavior so a manual abort is treated as an abort, not as a reason to keep retrying blindly
+- Tightened manual verification usability for real-email testing
+  - if the same email field is matched by overlapping selectors, it is no longer refilled unnecessarily
+  - manual verification now accepts a pasted verification URL / magic link in addition to a code or pure manual browser completion
+- Ran a real magic-link continuation attempt using the user-provided `artificialanalysis.ai` verification URL
+  - the runtime opened the link directly in a fresh visible browser session without re-triggering email login
+  - the site redirected to:
+    - `/login?...error=INVALID_TOKEN`
+  - conclusion:
+    - the provided magic link was already invalid / consumed by the time of execution
+    - continuation logic is wired, but this specific token could not be used to enter the product area
+- Returned to public-site analysis for `https://artificialanalysis.ai/` with a larger state budget
+  - ran `python -m src.cli --config config\smoke_test_artificialanalysis_demo.yaml --max-states 16 --max-depth 2 --clear`
+  - the run still terminated after only 4 captured states:
+    - home
+    - hardware benchmark
+    - AI Trends
+    - login
+  - important conclusion:
+    - `max_states` was not the limiting factor on this site
+    - the frontier emptied because route discovery only surfaced 4 public targets
+  - strongest follow-up implication:
+    - the next bottleneck for this site class is broader candidate extraction, especially menu/trigger/button-driven navigation rather than plain anchor discovery
+- Inspected the captured homepage DOM and route extractor to verify why public sub-entrances were missing
+  - confirmed the homepage contains many additional internal links such as `/models/...`, `/evaluations/...`, `/image/...`, `/video/...`, `/text-to-speech/...`, `/articles`, `/methodology`, `/faq`, and `/contact`
+  - confirmed `CandidateExtractor.extract_nav_targets()` currently scans only the configured `nav/sidebar` selectors
+  - confirmed the agent loop only adds discovered `ROUTE` targets from that extractor into the frontier
+  - conclusion:
+    - this is primarily an extractor-scope limitation, not a site-surface limitation
+- Reworked public route discovery to reduce dependence on framework-specific nav selectors
+  - `CandidateExtractor` now performs a DOM-wide visible `a[href]` scan in addition to the legacy nav pass
+  - same-site internal links are now filtered, prioritized, and capped before entering the frontier
+  - route metadata now carries region/context/priority so reranking can prefer main-content routes instead of top-nav-only routes
+  - submenu expansion was also broadened with safer generic `aria-expanded=false` navigation selectors
+- First validation of the broader extractor surfaced a second bug in action planning
+  - the run discovered 14 routes on the Artificial Analysis homepage, confirming that the new route extractor widened coverage
+  - but the public run also incorrectly planned a `fill_and_submit_form` action for `Submit a prompt` on the homepage and drifted into `/image/arena`
+  - that public-page form submission likely increased the chance of Cloudflare friction and definitely polluted the exploration path
+  - fixed by restricting generic form-submission planning to explicit auth surfaces only
+- Tightened the site-specific public demo config for `artificialanalysis.ai`
+  - disabled page-action planning
+  - disabled interaction exploration
+  - rationale:
+    - for this public competitive-analysis run, we want broader route coverage without opportunistically clicking or submitting on-page controls

@@ -1,0 +1,54 @@
+target:
+  url: "https://artificialanalysis.ai/login?redirect=https%3A%2F%2Fartificialanalysis.ai%2Forgs"
+  dashboard_url: "https://artificialanalysis.ai/orgs"
+
+task:
+  goal: "Complete the email entry flow, handle verification if needed, and enter the product area."
+  goal_keywords:
+    - "sign up"
+    - "email"
+    - "verification"
+    - "orgs"
+  allow_registration_flows: true
+  allow_login_flows: true
+  captcha_policy: "ignore"
+  human_assistance_allowed: true
+  use_site_memory: true
+  validate_action_outcomes: true
+  reobserve_on_state_change: true
+  use_vision_on_state_change: true
+  max_reobservations_per_run: 8
+  profile_name: "Test User"
+  profile_email: "zhiyuanzhang1997@gmail.com"
+  profile_password: "TestPassword123!"
+  profile_company: "Example Inc"
+
+login:
+  mode: "register"
+  register_url: "https://artificialanalysis.ai/login?redirect=https%3A%2F%2Fartificialanalysis.ai%2Forgs"
+  username_selector: "form input[name='email'], form input[inputmode='email'], input[name='email']"
+  registration_email_selector: "form input[name='email'], form input[inputmode='email'], input[name='email']"
+  registration_submit_selector: "form button[type='submit']"
+  verification_code_selector: "input[autocomplete='one-time-code'], input[name*='code'], input[id*='code'], input[inputmode='numeric']"
+  verification_submit_selector: "form button[type='submit'], button:has-text('Continue'), button:has-text('Verify')"
+
+budget:
+  max_states: 4
+  max_depth: 1
+  retry_limit: 1
+  novelty_threshold: 0.12
+
+browser:
+  headless: false
+  viewport_width: 1440
+  viewport_height: 900
+  slow_mo: 100
+
+vision:
+  enabled: false
+
+synthesis:
+  enabled: false
+
+run:
+  profile: "demo"

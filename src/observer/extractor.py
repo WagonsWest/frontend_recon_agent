@@ -1,20 +1,21 @@
-"""Candidate extractor — detects interactive targets on the current page."""
+"""Candidate extractor - detects interactive targets on the current page."""
 
 from __future__ import annotations
 
-from urllib.parse import urljoin
+from typing import Any
+from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import Page
 from rich.console import Console
 
+from src.agent.state import ExplorationTarget, PageCoverage, TargetType
 from src.config import AppConfig
-from src.agent.state import ExplorationTarget, TargetType, PageCoverage
 
 console = Console()
 
 
 class CandidateExtractor:
-    """Finds candidate navigation/interaction targets on the current page."""
+    """Find candidate navigation and interaction targets on the current page."""
 
     def __init__(self, config: AppConfig):
         self.config = config
@@ -44,13 +45,86 @@ class CandidateExtractor:
             return True
         return False
 
+    def _normalize_href(self, page_url: str, href: str) -> str:
+        """Resolve a discovered href to an absolute URL without fragments."""
+        absolute = urljoin(page_url, href or "").strip()
+        if "#" in absolute:
+            absolute = absolute.split("#", 1)[0]
+        return absolute
+
+    def _is_same_site_href(self, page_url: str, href: str) -> bool:
+        """Keep route discovery on the current site only."""
+        parsed_page = urlparse(page_url)
+        parsed_href = urlparse(self._normalize_href(page_url, href))
+        if parsed_href.scheme not in {"http", "https"}:
+            return False
+        return parsed_href.netloc == parsed_page.netloc
+
+    def _derive_label_from_href(self, href: str) -> str:
+        """Fallback label derived from the last path segment."""
+        path = urlparse(href).path.strip("/")
+        if not path:
+            return "Home"
+        segment = path.split("/")[-1].replace("-", " ").replace("_", " ").strip()
+        return segment[:80] if segment else "Route"
+
+    def _route_priority(self, label: str, href: str, region: str, context: str) -> int:
+        """Heuristic score for prioritizing public route candidates."""
+        label_lower = " ".join(label.lower().split())
+        href_lower = href.lower()
+        score = 0
+
+        if region == "nav":
+            score += 3
+        elif region == "main":
+            score += 4
+        elif region == "footer":
+            score -= 1
+
+        if context in {"table", "card", "section"}:
+            score += 2
+
+        for hint in self.config.exploration.high_value_path_hints:
+            if hint in href_lower or hint in label_lower:
+                score += 4
+
+        for hint in self.config.exploration.low_value_path_hints:
+            if hint in href_lower or hint in label_lower:
+                score -= 4
+
+        if any(token in href_lower for token in ["/login", "/signin", "/signup", "/register"]):
+            score += 1
+
+        return score
+
+    def _is_viable_route_candidate(self, page_url: str, label: str, href: str) -> bool:
+        """Filter out low-value or off-site routes before entering the frontier."""
+        href_lower = href.lower()
+        label_lower = label.lower()
+
+        if not self._is_same_site_href(page_url, href):
+            return False
+        if any(pat in href_lower for pat in self.config.exploration.skip_patterns):
+            return False
+        if self._is_low_value_nav_label(label):
+            return False
+        if self._is_low_value_nav_href(href):
+            return False
+        if any(hint in href_lower for hint in self.config.exploration.low_value_path_hints):
+            return False
+        if any(kw.lower() in label_lower for kw in self.config.exploration.destructive_keywords):
+            return False
+        if any(token in label_lower for token in ["logout", "sign out", "log out", "delete", "remove"]):
+            return False
+        return True
+
     async def _expand_submenus(self, page: Page) -> None:
         """Expand collapsed sub-menus so leaf items become visible."""
         for selector in self.config.exploration.submenu_expand_selectors:
             try:
                 submenus = page.locator(selector)
                 count = await submenus.count()
-                for i in range(count):
+                for i in range(min(count, 8)):
                     try:
                         item = submenus.nth(i)
                         if await item.is_visible():
@@ -61,12 +135,68 @@ class CandidateExtractor:
             except Exception:
                 continue
 
+    async def _collect_anchor_candidates(self, page: Page) -> list[dict[str, Any]]:
+        """Collect visible anchor metadata across the page in one DOM pass."""
+        return await page.evaluate(
+            """
+            () => {
+              const isVisible = (el) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                if (!rect.width || !rect.height) return false;
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                if (el.closest('[hidden], [aria-hidden="true"]')) return false;
+                return true;
+              };
+
+              return Array.from(document.querySelectorAll('a[href]')).map((el) => {
+                const rect = el.getBoundingClientRect();
+                const text = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+                const title = (el.getAttribute('title') || '').trim();
+
+                let region = 'other';
+                if (el.closest('nav, header, [role="navigation"], .navbar, .sidebar, .side-nav')) {
+                  region = 'nav';
+                } else if (el.closest('main, [role="main"], article')) {
+                  region = 'main';
+                } else if (el.closest('footer')) {
+                  region = 'footer';
+                }
+
+                let context = 'other';
+                if (el.closest('table, [role="table"], [class*="table"]')) {
+                  context = 'table';
+                } else if (el.closest('.card, [class*="card"], [class*="tile"], [class*="panel"], [class*="benchmark"], [class*="leaderboard"]')) {
+                  context = 'card';
+                } else if (el.closest('section')) {
+                  context = 'section';
+                } else if (el.closest('ul, ol')) {
+                  context = 'list';
+                }
+
+                return {
+                  hrefAttr: el.getAttribute('href') || '',
+                  hrefResolved: el.href || '',
+                  text,
+                  ariaLabel,
+                  title,
+                  visible: isVisible(el),
+                  region,
+                  context,
+                  top: rect.top,
+                  left: rect.left
+                };
+              });
+            }
+            """
+        )
+
     async def extract_nav_targets(self, page: Page, parent_id: str | None, depth: int) -> list[ExplorationTarget]:
         """Extract navigation menu items (sidebar, nav bar) as route targets."""
-        # First expand any collapsed sub-menus
         await self._expand_submenus(page)
 
-        targets = []
+        targets: list[ExplorationTarget] = []
         seen_hrefs: set[str] = set()
         seen_labels: set[str] = set()
 
@@ -80,24 +210,16 @@ class CandidateExtractor:
                         if not await el.is_visible():
                             continue
 
-                        label = (await el.text_content() or "").strip()
-                        if not label or len(label) > 50:
+                        label = " ".join(((await el.text_content()) or "").split()).strip()
+                        if not label or len(label) > 80:
                             continue
 
-                        # Skip destructive items
-                        if any(kw.lower() in label.lower() for kw in self.config.exploration.destructive_keywords):
-                            continue
-                        if any(pat in label.lower() for pat in ["logout", "登出", "退出"]):
-                            continue
-
-                        # Get href — try multiple attributes
                         href = ""
                         for attr in ["href", "to", "data-href"]:
                             href = await el.get_attribute(attr) or ""
                             if href:
                                 break
 
-                        # If no href on the element itself, check child <a> tags
                         if not href:
                             try:
                                 child_a = el.locator("a[href]").first
@@ -106,47 +228,37 @@ class CandidateExtractor:
                             except Exception:
                                 pass
 
-                        # Skip if no href and not a direct link — it's likely a sub-menu toggle
                         if not href:
-                            tag_name = await el.evaluate("el => el.tagName.toLowerCase()")
+                            tag_name = await el.evaluate("node => node.tagName.toLowerCase()")
                             if tag_name != "a":
                                 continue
 
-                        # Skip excluded patterns
-                        if any(pat in href for pat in self.config.exploration.skip_patterns):
+                        absolute_href = self._normalize_href(page.url, href)
+                        if not self._is_viable_route_candidate(page.url, label, absolute_href):
                             continue
 
-                        if self._is_low_value_nav_label(label):
+                        if absolute_href in seen_hrefs or label in seen_labels:
                             continue
-                        if self._is_low_value_nav_href(href):
-                            continue
-
-                        # Dedup by href
-                        if href and href in seen_hrefs:
-                            continue
-                        if href:
-                            seen_hrefs.add(href)
-
-                        # Dedup by label
-                        if label in seen_labels:
-                            continue
+                        seen_hrefs.add(absolute_href)
                         seen_labels.add(label)
 
-                        # Resolve routes to absolute URLs at discovery time so later navigation
-                        # does not accidentally inherit the wrong current domain.
-                        absolute_href = urljoin(page.url, href) if href else ""
-                        locator = absolute_href if absolute_href else f"{selector} >> nth={i}"
-
-                        target = ExplorationTarget.create(
-                            target_type=TargetType.ROUTE,
-                            locator=locator,
-                            label=label,
-                            parent_id=parent_id,
-                            depth=depth + 1,
-                            discovery_method="nav_menu",
-                            metadata={"href": absolute_href or href, "original_selector": selector},
+                        targets.append(
+                            ExplorationTarget.create(
+                                target_type=TargetType.ROUTE,
+                                locator=absolute_href,
+                                label=label,
+                                parent_id=parent_id,
+                                depth=depth + 1,
+                                discovery_method="nav_menu",
+                                metadata={
+                                    "href": absolute_href,
+                                    "original_selector": selector,
+                                    "region": "nav",
+                                    "context": "nav",
+                                    "priority": self._route_priority(label, absolute_href, "nav", "nav"),
+                                },
+                            )
                         )
-                        targets.append(target)
                     except Exception:
                         continue
             except Exception:
@@ -154,8 +266,70 @@ class CandidateExtractor:
 
         return targets
 
+    async def extract_internal_link_targets(self, page: Page, parent_id: str | None, depth: int) -> list[ExplorationTarget]:
+        """Extract visible same-site links across the page, not just inside nav."""
+        targets: list[ExplorationTarget] = []
+        seen_hrefs: set[str] = set()
+        seen_labels: set[str] = set()
+
+        try:
+            anchors = await self._collect_anchor_candidates(page)
+        except Exception:
+            return targets
+
+        ranked_candidates: list[tuple[int, str, str, str, str]] = []
+        for anchor in anchors:
+            try:
+                if not bool(anchor.get("visible")):
+                    continue
+
+                href = str(anchor.get("hrefResolved") or anchor.get("hrefAttr") or "").strip()
+                href = self._normalize_href(page.url, href)
+                label = str(anchor.get("text") or anchor.get("ariaLabel") or anchor.get("title") or "").strip()
+                if not label:
+                    label = self._derive_label_from_href(href)
+                label = " ".join(label.split()).strip()
+                if not label or len(label) > 80:
+                    continue
+
+                region = str(anchor.get("region") or "other")
+                context = str(anchor.get("context") or "other")
+
+                if not self._is_viable_route_candidate(page.url, label, href):
+                    continue
+                if href in seen_hrefs or label in seen_labels:
+                    continue
+
+                seen_hrefs.add(href)
+                seen_labels.add(label)
+                ranked_candidates.append((self._route_priority(label, href, region, context), href, label, region, context))
+            except Exception:
+                continue
+
+        ranked_candidates.sort(key=lambda item: (-item[0], item[2].lower(), item[1]))
+        for priority, href, label, region, context in ranked_candidates[: self.config.exploration.max_route_candidates_per_page]:
+            targets.append(
+                ExplorationTarget.create(
+                    target_type=TargetType.ROUTE,
+                    locator=href,
+                    label=label,
+                    parent_id=parent_id,
+                    depth=depth + 1,
+                    discovery_method="internal_link",
+                    metadata={
+                        "href": href,
+                        "region": region,
+                        "context": context,
+                        "priority": priority,
+                        "original_selector": "document.querySelectorAll('a[href]')",
+                    },
+                )
+            )
+
+        return targets
+
     async def extract_action_targets(self, page: Page, parent_id: str | None, depth: int) -> list[ExplorationTarget]:
-        """Extract action buttons (操作/Actions dropdowns) as interaction targets."""
+        """Extract action buttons (Actions dropdowns) as interaction targets."""
         targets = []
         icfg = self.config.interaction
 
@@ -164,18 +338,18 @@ class CandidateExtractor:
                 loc = page.locator(selector)
                 count = await loc.count()
                 if count > 0 and await loc.first.is_visible():
-                    # Use parent_id in label to make it unique per page
                     page_label = parent_id or "root"
-                    target = ExplorationTarget.create(
-                        target_type=TargetType.DROPDOWN,
-                        locator=selector,
-                        label=f"action_dropdown@{page_label}",
-                        parent_id=parent_id,
-                        depth=depth + 1,
-                        discovery_method="action_button",
-                        metadata={"button_count": count},
+                    targets.append(
+                        ExplorationTarget.create(
+                            target_type=TargetType.DROPDOWN,
+                            locator=selector,
+                            label=f"action_dropdown@{page_label}",
+                            parent_id=parent_id,
+                            depth=depth + 1,
+                            discovery_method="action_button",
+                            metadata={"button_count": count},
+                        )
                     )
-                    targets.append(target)
                     break
             except Exception:
                 continue
@@ -193,15 +367,16 @@ class CandidateExtractor:
                 if await loc.count() > 0 and await loc.first.is_visible():
                     label = (await loc.first.text_content() or "add").strip()
                     page_label = parent_id or "root"
-                    target = ExplorationTarget.create(
-                        target_type=TargetType.MODAL,
-                        locator=selector,
-                        label=f"add_form_{label}@{page_label}",
-                        parent_id=parent_id,
-                        depth=depth + 1,
-                        discovery_method="add_button",
+                    targets.append(
+                        ExplorationTarget.create(
+                            target_type=TargetType.MODAL,
+                            locator=selector,
+                            label=f"add_form_{label}@{page_label}",
+                            parent_id=parent_id,
+                            depth=depth + 1,
+                            discovery_method="add_button",
+                        )
                     )
-                    targets.append(target)
                     break
             except Exception:
                 continue
@@ -225,16 +400,17 @@ class CandidateExtractor:
                     if not label:
                         continue
                     page_label = parent_id or "root"
-                    target = ExplorationTarget.create(
-                        target_type=TargetType.TAB_STATE,
-                        locator=f"{icfg.tab_selector} >> nth={i}",
-                        label=f"tab_{label}@{page_label}",
-                        parent_id=parent_id,
-                        depth=depth + 1,
-                        discovery_method="tab_bar",
-                        metadata={"tab_index": i, "tab_text": label},
+                    targets.append(
+                        ExplorationTarget.create(
+                            target_type=TargetType.TAB_STATE,
+                            locator=f"{icfg.tab_selector} >> nth={i}",
+                            label=f"tab_{label}@{page_label}",
+                            parent_id=parent_id,
+                            depth=depth + 1,
+                            discovery_method="tab_bar",
+                            metadata={"tab_index": i, "tab_text": label},
+                        )
                     )
-                    targets.append(target)
                 except Exception:
                     continue
         except Exception:
@@ -253,16 +429,17 @@ class CandidateExtractor:
                 count = await loc.count()
                 if count > 0 and await loc.first.is_visible():
                     page_label = parent_id or "root"
-                    target = ExplorationTarget.create(
-                        target_type=TargetType.EXPANDED_ROW,
-                        locator=selector,
-                        label=f"expand_row@{page_label}",
-                        parent_id=parent_id,
-                        depth=depth + 1,
-                        discovery_method="table_expand",
-                        metadata={"expand_count": count},
+                    targets.append(
+                        ExplorationTarget.create(
+                            target_type=TargetType.EXPANDED_ROW,
+                            locator=selector,
+                            label=f"expand_row@{page_label}",
+                            parent_id=parent_id,
+                            depth=depth + 1,
+                            discovery_method="table_expand",
+                            metadata={"expand_count": count},
+                        )
                     )
-                    targets.append(target)
                     break
             except Exception:
                 continue
@@ -279,13 +456,14 @@ class CandidateExtractor:
         )
 
         nav = await self.extract_nav_targets(page, parent_id, depth)
+        internal_links = await self.extract_internal_link_targets(page, parent_id, depth)
         all_targets.extend(nav)
-        coverage.nav_items_found = len(nav)
+        all_targets.extend(internal_links)
+        coverage.nav_items_found = len(nav) + len(internal_links)
 
         actions = await self.extract_action_targets(page, parent_id, depth)
         all_targets.extend(actions)
 
-        # Count raw action buttons and try to peek at dropdown items
         for selector in self.config.interaction.action_button_selectors:
             try:
                 loc = page.locator(selector)
@@ -296,7 +474,6 @@ class CandidateExtractor:
             except Exception:
                 continue
 
-        # Peek at dropdown items (without clicking) — count visible ones if any dropdown is open
         try:
             dropdown_items = page.locator(self.config.interaction.dropdown_item_selector)
             di_count = await dropdown_items.count()

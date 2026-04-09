@@ -23,15 +23,46 @@ class TargetConfig(BaseModel):
 
 
 class LoginConfig(BaseModel):
+    mode: str = "auto"
     username: str = ""
     password: str = ""
+    register_url: str = ""
+    register_link_selector: str = ""
     username_selector: str = "input[type='text'], input[name='username'], input[name='email']"
     password_selector: str = "input[type='password']"
     submit_selector: str = (
-        "button[type='submit'], button:has-text('Login'), button:has-text('Sign in'), "
+        "form button[type='submit'], form input[type='submit'], button[type='submit'], button:has-text('Login'), button:has-text('Sign in'), "
         "button:has-text('登录'), button:has-text('Log in')"
     )
     success_indicator: str = ""
+    registration_name_selector: str = (
+        "input[name='name'], input[name='full_name'], input[name='fullname'], "
+        "input[autocomplete='name']"
+    )
+    registration_email_selector: str = "input[type='email'], input[name='email']"
+    registration_password_selector: str = (
+        "input[type='password'], input[name='password'], input[autocomplete='new-password']"
+    )
+    registration_confirm_password_selector: str = (
+        "input[name='confirm_password'], input[name='password_confirmation'], "
+        "input[name='confirmPassword']"
+    )
+    registration_company_selector: str = (
+        "input[name='company'], input[name='organization'], input[name='org'], input[name='workspace']"
+    )
+    registration_submit_selector: str = (
+        "form button[type='submit'], form input[type='submit'], button[type='submit'], button:has-text('Sign up'), button:has-text('Get started'), "
+        "button:has-text('Create account'), button:has-text('Register')"
+    )
+    registration_success_indicator: str = ""
+    verification_code_selector: str = (
+        "input[autocomplete='one-time-code'], input[name*='code'], input[id*='code'], "
+        "input[name*='otp'], input[id*='otp'], input[inputmode='numeric']"
+    )
+    verification_submit_selector: str = (
+        "form button[type='submit'], form input[type='submit'], button[type='submit'], button:has-text('Verify'), button:has-text('Continue'), "
+        "button:has-text('Confirm'), button:has-text('Activate')"
+    )
 
 
 class TaskConfig(BaseModel):
@@ -83,10 +114,29 @@ class ExplorationConfig(BaseModel):
         ".ant-menu-item",                   # Ant Design (no child a)
         "nav a[href]", ".sidebar a[href]", ".side-nav a[href]",
     ])
+    max_route_candidates_per_page: int = 40
+    high_value_path_hints: list[str] = Field(default_factory=lambda: [
+        "benchmark", "benchmarks", "model", "models", "evaluation", "evaluations",
+        "leaderboard", "arena", "trend", "trends", "pricing", "provider", "providers",
+        "article", "articles", "methodology", "guide", "docs", "documentation",
+        "research", "report", "reports", "image", "video", "speech", "audio",
+        "compare", "comparison", "faq",
+    ])
+    low_value_path_hints: list[str] = Field(default_factory=lambda: [
+        "privacy", "terms", "legal", "cookie", "cookies", "mailto:",
+        "x.com", "twitter.com", "linkedin.com", "discord.gg", "youtube.com",
+    ])
     # Selectors for collapsed sub-menus that need expanding before nav items are visible
     submenu_expand_selectors: list[str] = Field(default_factory=lambda: [
         ".el-sub-menu:not(.is-opened) > .el-sub-menu__title",
         ".ant-menu-submenu:not(.ant-menu-submenu-open) > .ant-menu-submenu-title",
+        "nav button[aria-expanded='false']",
+        "nav [role='button'][aria-expanded='false']",
+        "header button[aria-expanded='false']",
+        "header [role='button'][aria-expanded='false']",
+        "[role='navigation'] button[aria-expanded='false']",
+        "[role='navigation'] [role='button'][aria-expanded='false']",
+        "[aria-haspopup='menu'][aria-expanded='false']",
     ])
 
 
@@ -168,6 +218,7 @@ class SynthesisConfig(BaseModel):
     artifact_filename_json: str = "competitive_analysis_llm.json"
     artifact_filename_md: str = "competitive_analysis.md"
     structured_report_filename_md: str = "competitive_analysis_structured.md"
+    readable_report_filename_md: str = "competitive_analysis_readable.md"
 
 
 class OutputConfig(BaseModel):
@@ -175,6 +226,29 @@ class OutputConfig(BaseModel):
     dom_snapshots_dir: str = "output/dom_snapshots"
     reports_dir: str = "output/reports"
     artifacts_dir: str = "output/artifacts"
+
+
+class RunConfig(BaseModel):
+    profile: str = "default"
+    navigation_wait_until: str = "networkidle"
+    enable_page_action_planning: bool = True
+    enable_interaction_exploration: bool = True
+    enable_extraction: bool = True
+    capture_report_screenshots: bool = True
+    enable_timing_summary: bool = True
+
+
+class BatchSiteConfig(BaseModel):
+    name: str
+    config: str
+    max_states: int | None = None
+    max_depth: int | None = None
+
+
+class BatchRunConfig(BaseModel):
+    name: str = ""
+    output_root: str = "output/batch"
+    sites: list[BatchSiteConfig] = Field(default_factory=list)
 
 
 class AppConfig(BaseModel):
@@ -188,6 +262,7 @@ class AppConfig(BaseModel):
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
     synthesis: SynthesisConfig = Field(default_factory=SynthesisConfig)
+    run: RunConfig = Field(default_factory=RunConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
 
 
@@ -235,3 +310,70 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
             raise SystemExit(f"Permission denied creating directory: {project_root / dir_path}") from None
 
     return config
+
+
+def load_batch_config(config_path: str | Path) -> tuple[BatchRunConfig, Path]:
+    """Load a batch-run config and return it with its base directory."""
+    path = Path(config_path)
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data: dict[str, Any] = yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        raise SystemExit(f"Invalid YAML in {path}: {e}") from e
+    except FileNotFoundError:
+        raise SystemExit(f"Batch config file not found: {path}") from None
+
+    config = BatchRunConfig(**data)
+    if not config.sites:
+        raise SystemExit(f"Batch config {path} must include at least one site entry")
+    return config, path.parent.resolve()
+
+
+def apply_run_profile(config: AppConfig, profile_name: str | None) -> str:
+    """Apply a named run profile to the in-memory config."""
+    selected = (profile_name or config.run.profile or "default").strip().lower()
+    config.run.profile = selected
+
+    if selected == "default":
+        return selected
+
+    if selected == "smoke_fast":
+        config.run.navigation_wait_until = "domcontentloaded"
+        config.run.enable_page_action_planning = False
+        config.run.enable_interaction_exploration = False
+        config.run.enable_extraction = False
+        config.run.capture_report_screenshots = False
+        config.browser.slow_mo = 0
+        config.crawl.wait_after_navigation = min(config.crawl.wait_after_navigation, 500)
+        config.crawl.wait_for_spa = min(config.crawl.wait_for_spa, 700)
+        config.crawl.interaction_timeout = min(config.crawl.interaction_timeout, 2500)
+        config.budget.max_states = min(config.budget.max_states, 4)
+        config.budget.max_depth = min(config.budget.max_depth, 1)
+        config.task.reobserve_on_state_change = False
+        config.task.use_vision_on_state_change = False
+        config.vision.enabled = False
+        config.synthesis.enabled = False
+        return selected
+
+    if selected == "demo":
+        config.run.navigation_wait_until = "domcontentloaded"
+        config.run.enable_page_action_planning = True
+        config.run.enable_interaction_exploration = True
+        config.run.enable_extraction = True
+        config.run.capture_report_screenshots = True
+        config.browser.slow_mo = min(config.browser.slow_mo, 100)
+        config.crawl.wait_after_navigation = min(config.crawl.wait_after_navigation, 1200)
+        config.crawl.wait_for_spa = min(config.crawl.wait_for_spa, 1200)
+        config.synthesis.enabled = False
+        return selected
+
+    if selected == "full":
+        config.run.navigation_wait_until = "networkidle"
+        config.run.enable_page_action_planning = True
+        config.run.enable_interaction_exploration = True
+        config.run.enable_extraction = True
+        config.run.capture_report_screenshots = True
+        return selected
+
+    raise SystemExit(f"Unsupported run profile: {selected}")

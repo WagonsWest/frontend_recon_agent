@@ -24,6 +24,7 @@ from src.observer.fingerprint import DOMFingerprinter
 from src.observer.novelty import NoveltyScorer
 from src.analyzer.page_analyzer import PageAnalyzer
 from src.analysis.competitive_report import CompetitiveReportGenerator
+from src.analysis.readable_report import ReadableCompetitiveReportGenerator
 from src.analysis.synthesis_client import CompetitiveSynthesisClient
 from src.artifacts.manager import ArtifactManager
 from src.artifacts.inventory import InventoryGenerator
@@ -103,6 +104,7 @@ class ExplorationEngine:
             f"[bold cyan]Frontend Mimic Agent[/bold cyan]\n"
             f"Target: {self.config.target.url}\n"
             f"Goal: {self.config.task.goal}\n"
+            f"Profile: {self.config.run.profile}\n"
             f"Budget: {self.config.budget.max_states} states, depth {self.config.budget.max_depth}\n"
             f"Novelty threshold: {self.config.budget.novelty_threshold}",
             title="Agent Configuration",
@@ -149,14 +151,15 @@ class ExplorationEngine:
                     continue
 
                 await self._phase_analyze(snapshot)
-                await self._run_extraction(
-                    snapshot,
-                    capture_label=decision.label or self._url_to_label(snapshot.url),
-                    capture_context="route",
-                    allow_vision=True,
-                )
+                if self.config.run.enable_extraction:
+                    await self._run_extraction(
+                        snapshot,
+                        capture_label=decision.label or self._url_to_label(snapshot.url),
+                        capture_context="route",
+                        allow_vision=True,
+                    )
 
-                if self.state.has_budget():
+                if self.state.has_budget() and self.config.run.enable_interaction_exploration:
                     target = self.state.targets.get(snapshot.target_id)
                     if target:
                         await self._explore_page_interactions(target)
@@ -202,6 +205,10 @@ class ExplorationEngine:
                     ctx["reason"] = "login successful"
                     console.print("[green]Authenticated successfully[/green]")
                     return
+                if self.authenticator.manual_abort_requested:
+                    ctx["result"] = "aborted"
+                    ctx["reason"] = "authentication aborted during manual verification"
+                    raise RuntimeError("Authentication aborted during manual verification.")
                 ctx["result"] = "retry" if attempt < 2 else "failed"
                 ctx["reason"] = f"login attempt {attempt + 1} failed"
             console.print(f"[yellow]Login attempt {attempt + 1} failed, retrying...[/yellow]")
@@ -241,7 +248,10 @@ class ExplorationEngine:
 
             # Only add ROUTE targets to the frontier
             added = self.state.add_targets(route_candidates)
-            planned = await self._plan_page_actions(current_url)
+            planned = (
+                await self._plan_page_actions(current_url)
+                if self.config.run.enable_page_action_planning else []
+            )
             decisions_added = self.state.add_decisions(planned)
             ctx["reason"] = (
                 f"found {len(route_candidates)} routes, {added} new, "
@@ -749,6 +759,13 @@ class ExplorationEngine:
         url = await self.controller.get_url()
         title = await self.controller.get_title()
         screenshot_path = await self.controller.capture_screenshot(label, context)
+        report_screenshot_path = ""
+        if self.config.run.capture_report_screenshots:
+            report_screenshot_path = await self._capture_report_screenshot(
+                label,
+                context,
+                prefer_full_page=False,
+            )
         html_path = await self.controller.save_html(label, context)
 
         snapshot = StateSnapshot.create(
@@ -758,6 +775,11 @@ class ExplorationEngine:
             visit_status=VisitStatus.SUCCESS,
             depth=parent_target.depth + 1,
             novelty_score=novelty, dom_fingerprint=fingerprint,
+            metadata={
+                "capture_label": label,
+                "capture_context": context,
+                "report_screenshot_path": report_screenshot_path,
+            },
         )
         self.state.register_state(snapshot)
         self.state.consume_budget()
@@ -778,17 +800,29 @@ class ExplorationEngine:
                 allow_vision=self.config.task.use_vision_on_state_change,
                 discover_candidates=False,
             )
-        await self._run_extraction(
-            snapshot,
-            capture_label=label,
-            capture_context=context,
-            allow_vision=self.config.task.use_vision_on_state_change,
-        )
+        if self.config.run.enable_extraction:
+            await self._run_extraction(
+                snapshot,
+                capture_label=label,
+                capture_context=context,
+                allow_vision=self.config.task.use_vision_on_state_change,
+            )
 
         self.logger.log(AgentPhase.EXECUTE, f"capture_{context}", label,
                       "success", f"novelty={novelty:.2f}")
         console.print(f"[green]    Captured: {url} (novelty={novelty:.2f})[/green]")
         return "captured"
+
+    async def _capture_report_screenshot(
+        self,
+        label: str,
+        context: str,
+        prefer_full_page: bool,
+    ) -> str:
+        """Capture the image variant best suited for the human-readable report."""
+        if prefer_full_page:
+            return await self.controller.capture_screenshot(label, f"{context}_report")
+        return await self.controller.capture_viewport_screenshot(label, f"{context}_report")
 
     async def _phase_analyze(self, snapshot: StateSnapshot) -> None:
         """ANALYZE: Run local page analysis on the captured state."""
@@ -937,6 +971,17 @@ class ExplorationEngine:
                 self.config.synthesis.structured_report_filename_md,
                 structured_markdown,
             )
+            readable_markdown = ReadableCompetitiveReportGenerator().generate(
+                self.state,
+                competitive,
+                self._page_insights,
+                self._extraction_results,
+                self.artifacts.reports_dir(),
+            )
+            self.artifacts.save_text(
+                self.config.synthesis.readable_report_filename_md,
+                readable_markdown,
+            )
 
             synthesized = await self.synthesis.synthesize(
                 competitive.model_dump(),
@@ -963,6 +1008,16 @@ class ExplorationEngine:
                 f"modules={len(competitive.feature_modules)}"
             )
 
+        if self.config.run.enable_timing_summary:
+            timing_path = self.artifacts.save_json("run_timing_summary.json", self.logger.summary())
+            self.logger.log(
+                AgentPhase.FINALIZE,
+                "generate_timing_summary",
+                "",
+                "success",
+                f"timing summary -> {timing_path.name}",
+            )
+
         stats = self.state.get_stats()
         console.print(Panel.fit(
             f"[bold green]Exploration Complete[/bold green]\n\n"
@@ -973,7 +1028,9 @@ class ExplorationEngine:
             f"Steps: {stats['steps']}\n\n"
             f"Artifacts:\n"
             f"  inventory.json, sitemap.json, run_log.jsonl\n"
+            f"  run_timing_summary.json\n"
             f"  exploration_report.md\n"
+            f"  {self.config.synthesis.readable_report_filename_md}\n"
             f"  {len(self._analysis_results)} state analyses\n"
             f"  {len(self._page_insights)} page insights\n"
             f"  {len(self._extraction_results)} extraction results\n"
@@ -1022,6 +1079,7 @@ class ExplorationEngine:
         """Plan page-level next actions from the current visible state."""
         decisions: list[ActionDecision] = []
         url_key = self._normalize_url(current_url)
+        auth_surface = self._looks_like_auth_surface(current_url)
 
         # Non-active tabs
         try:
@@ -1077,43 +1135,48 @@ class ExplorationEngine:
             pass
 
         # Generic primary CTA planning for onboarding-like flows
-        try:
-            cta_locator = self.controller.page.locator("button, a, [role='button']")
-            cta_count = await cta_locator.count()
-            keywords = (
-                "sign up", "register", "create account", "get started", "continue",
-                "next", "start", "try now", "login", "sign in"
-            )
-            for i in range(min(cta_count, 20)):
-                button = cta_locator.nth(i)
-                if not await button.is_visible():
-                    continue
-                text = " ".join(((await button.text_content()) or "").split()).strip()
-                lower = text.lower()
-                if not text or not any(keyword in lower for keyword in keywords):
-                    continue
-                decisions.append(ActionDecision(
-                    action_type=ActionType.CLICK_ACTION,
-                    target_id=self.state.current_target_id,
-                    label=text,
-                    reason="primary onboarding/auth CTA discovered",
-                    dedup_key=f"cta:{url_key}:{text}:{i}",
-                    metadata={
-                        "selector": "button, a, [role='button']",
-                        "index": i,
-                        "context": "step_transition",
-                    },
-                ))
-        except Exception:
-            pass
+        if not auth_surface:
+            try:
+                cta_locator = self.controller.page.locator("button, a, [role='button']")
+                cta_count = await cta_locator.count()
+                keywords = (
+                    "sign up", "register", "create account", "get started", "continue",
+                    "next", "start", "try now", "login", "sign in"
+                )
+                for i in range(min(cta_count, 20)):
+                    button = cta_locator.nth(i)
+                    if not await button.is_visible():
+                        continue
+                    text = " ".join(((await button.text_content()) or "").split()).strip()
+                    lower = text.lower()
+                    href = ((await button.get_attribute("href")) or "").lower()
+                    if not text or not any(keyword in lower for keyword in keywords):
+                        continue
+                    if any(token in href for token in [".pdf", "terms", "privacy", "legal"]):
+                        continue
+                    decisions.append(ActionDecision(
+                        action_type=ActionType.CLICK_ACTION,
+                        target_id=self.state.current_target_id,
+                        label=text,
+                        reason="primary onboarding/auth CTA discovered",
+                        dedup_key=f"cta:{url_key}:{text}:{i}",
+                        metadata={
+                            "selector": "button, a, [role='button']",
+                            "index": i,
+                            "context": "step_transition",
+                        },
+                    ))
+            except Exception:
+                pass
 
-        # Auth / onboarding forms
-        try:
-            form_decision = await self._plan_form_action(current_url)
-            if form_decision:
-                decisions.append(form_decision)
-        except Exception:
-            pass
+        # Auth / onboarding forms should only run on explicit auth surfaces.
+        if auth_surface and (self.config.task.allow_login_flows or self.config.task.allow_registration_flows):
+            try:
+                form_decision = await self._plan_form_action(current_url)
+                if form_decision:
+                    decisions.append(form_decision)
+            except Exception:
+                pass
 
         return decisions
 
@@ -1225,6 +1288,20 @@ class ExplorationEngine:
             return self.config.task.profile_name
         return None
 
+    def _looks_like_auth_surface(self, current_url: str) -> bool:
+        lowered = current_url.lower()
+        return any(term in lowered for term in [
+            "/login",
+            "/signin",
+            "/sign-in",
+            "/signup",
+            "/sign-up",
+            "/register",
+            "/auth",
+            "/verify",
+            "/join",
+        ])
+
     async def _reobserve_current_state(
         self,
         state_id: str,
@@ -1285,19 +1362,31 @@ class ExplorationEngine:
 
         def score(candidate: ExplorationTarget) -> tuple[int, int, str]:
             label = candidate.label.lower()
-            score_value = 0
+            locator = candidate.locator.lower()
+            score_value = int(candidate.metadata.get("priority", 0))
+
+            if candidate.discovery_method == "internal_link":
+                score_value += 1
+            if str(candidate.metadata.get("region", "")) == "main":
+                score_value += 1
 
             if page_type == "dashboard":
                 if any(term in label for term in ["list", "manage", "workspace", "setting", "config", "user"]):
                     score_value += 3
             elif page_type == "landing":
-                if any(term in label for term in ["about", "docs", "download", "community", "learn", "get started"]):
+                if any(term in label for term in [
+                    "about", "docs", "download", "community", "learn", "get started",
+                    "benchmarks", "models", "evaluation", "leaderboard", "methodology",
+                ]):
                     score_value += 3
             elif page_type == "docs":
                 if any(term in label for term in ["docs", "tutorial", "guide", "reference", "download", "about"]):
                     score_value += 3
             elif page_type == "content":
-                if any(term in label for term in ["about", "community", "blog", "events", "jobs", "news"]):
+                if any(term in label for term in [
+                    "about", "community", "blog", "events", "jobs", "news",
+                    "analysis", "methodology", "article", "report",
+                ]):
                     score_value += 2
             elif page_type == "list":
                 if any(term in label for term in ["detail", "view", "record", "item"]):
@@ -1312,7 +1401,7 @@ class ExplorationEngine:
                     score_value += 2
 
             for term in self._goal_terms():
-                if term in label or term in candidate.locator.lower():
+                if term in label or term in locator:
                     score_value += 3
 
             score_value += int(self._site_memory["label_success"].get(label, 0))
@@ -1665,6 +1754,13 @@ class ExplorationEngine:
             self.novelty_scorer.register(html, fingerprint)
 
             screenshot_path = await self.controller.capture_screenshot(label, "route")
+            report_screenshot_path = ""
+            if self.config.run.capture_report_screenshots:
+                report_screenshot_path = await self._capture_report_screenshot(
+                    label,
+                    "route",
+                    prefer_full_page=(target.depth == 0),
+                )
             html_path = await self.controller.save_html(label, "route")
 
             snapshot = StateSnapshot.create(
@@ -1672,6 +1768,11 @@ class ExplorationEngine:
                 screenshot_path=screenshot_path, html_path=html_path,
                 visit_status=VisitStatus.SUCCESS, depth=target.depth,
                 novelty_score=novelty, dom_fingerprint=fingerprint,
+                metadata={
+                    "capture_label": label,
+                    "capture_context": "route",
+                    "report_screenshot_path": report_screenshot_path,
+                },
             )
 
             self.state.register_state(snapshot)

@@ -23,12 +23,24 @@ task:
   profile_company: "Example Inc"
 
 login:
+  mode: "auto"                           # auto | public | login | register
   username: ""                            # Your account username
   password: ""                            # Your account password
+  register_url: ""                        # Optional explicit registration URL
+  register_link_selector: ""              # Optional selector that opens the registration form
   username_selector: "input[type='text'], input[name='username'], input[name='email']"
   password_selector: "input[type='password']"
   submit_selector: "button[type='submit'], button:has-text('Login'), button:has-text('Sign in'), button:has-text('登录'), button:has-text('Log in')"
   success_indicator: ""                   # Optional: selector visible only after login
+  registration_name_selector: "input[name='name'], input[name='full_name'], input[name='fullname'], input[autocomplete='name']"
+  registration_email_selector: "input[type='email'], input[name='email']"
+  registration_password_selector: "input[type='password'], input[name='password'], input[autocomplete='new-password']"
+  registration_confirm_password_selector: "input[name='confirm_password'], input[name='password_confirmation'], input[name='confirmPassword']"
+  registration_company_selector: "input[name='company'], input[name='organization'], input[name='org'], input[name='workspace']"
+  registration_submit_selector: "button[type='submit'], button:has-text('Sign up'), button:has-text('Get started'), button:has-text('Create account'), button:has-text('Register')"
+  registration_success_indicator: ""      # Optional: selector visible only after registration succeeds
+  verification_code_selector: "input[autocomplete='one-time-code'], input[name*='code'], input[id*='code'], input[name*='otp'], input[id*='otp'], input[inputmode='numeric']"
+  verification_submit_selector: "button[type='submit'], button:has-text('Verify'), button:has-text('Continue'), button:has-text('Confirm'), button:has-text('Activate')"
 
 crawl:
   wait_after_navigation: 1500             # ms to wait after each navigation
@@ -106,7 +118,7 @@ interaction:
   tab_selector: ".el-tabs__item:not(.is-active), .ant-tabs-tab:not(.ant-tabs-tab-active), .nav-link:not(.active)"
 
 browser:
-  headless: false
+  headless: false                         # Visible browser is required for manual auth/verification assistance
   viewport_width: 1920
   viewport_height: 1080
   slow_mo: 200
@@ -132,6 +144,16 @@ synthesis:
   artifact_filename_json: "competitive_analysis_llm.json"
   artifact_filename_md: "competitive_analysis.md"
   structured_report_filename_md: "competitive_analysis_structured.md"
+  readable_report_filename_md: "competitive_analysis_readable.md"
+
+run:
+  profile: "default"                      # default | smoke_fast | demo | full
+  navigation_wait_until: "networkidle"   # networkidle | domcontentloaded
+  enable_page_action_planning: true
+  enable_interaction_exploration: true
+  enable_extraction: true
+  capture_report_screenshots: true
+  enable_timing_summary: true
 
 output:
   screenshots_dir: "output/screenshots"
