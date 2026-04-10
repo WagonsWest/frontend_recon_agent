@@ -28,6 +28,7 @@
 ## Current Runtime Notes
 
 - Playwright remains the browser runtime.
+- Browser launch now respects configured headless mode instead of forcing visible mode.
 - The engine now includes:
   - goal-aware decision scoring
   - validate-after-action checks
@@ -35,6 +36,11 @@
   - challenge detection and human-assisted pause/resume
   - re-observation after meaningful state changes
 - Vision is advisory and grounded by DOM snapshots rather than driving raw selectors directly.
+- Public multi-site execution is now materially more usable:
+  - batch runs can limit concurrent sites
+  - per-site outputs are isolated under batch subdirectories
+  - vision requests are throttled with a shared in-process concurrency gate
+  - CLI can launch one to three ad-hoc target URLs without writing a dedicated batch YAML first
 
 ## Recently Fixed Review Issues
 
@@ -59,10 +65,12 @@
 - Comparison report quality still needs calibration against human-written competitive-analysis memos.
 - Screenshot ranking is improved, but human-judged validation is still missing.
 - Some mojibake / text cleanup remains in the reporting pipeline.
+- The new ad-hoc URL runner is optimized for public sites; auth-heavy or challenge-heavy targets still rely more on explicit config.
 
 ## Validation State
 
 - `python -m compileall src` passed after the latest runtime fixes.
+- `python -m compileall src` also passed after the headless/concurrency/CLI runner changes.
 - No meaningful automated test suite is present in the repository right now.
 - Runtime confidence still depends mainly on smoke runs.
 
@@ -80,3 +88,29 @@
   - explicit environment/bootstrap diagnostics for browser connectivity
 - Less attractive borrow point for now:
   - replacing the current Playwright runtime with a CDP-proxy-first architecture would trade away isolation and reproducibility in exchange for easier access to existing user sessions
+
+## Report Quality Work
+
+- Existing crawl artifacts are already sufficient to improve report quality without changing crawl behavior first.
+- The main weakness was interpretation quality, not raw evidence volume.
+  - reports over-weighted page-type counts
+  - reports mixed target-site analysis with self-referential commentary about this project
+  - reports did not state route-family skew clearly enough
+- `artificialanalysis.ai` is a strong example:
+  - old output classified it as `developer_docs`
+  - regenerated output from the same artifacts classifies it as `analysis_portal`
+  - regenerated output now explicitly calls out 70% evidence concentration in `models` pages
+- Fields that proved useful for better reporting:
+  - homepage hero and CTA extraction in `dataset.jsonl`
+  - route-family concentration inferred from `inventory.json`
+  - captured route examples from `inventory.json` and `sitemap.json`
+  - page insights from `output/artifacts/page_insights/`
+- Report improvements implemented:
+  - explicit product thesis
+  - route-family distribution
+  - primary public entry points
+  - product pillars inferred from repeated extracted text
+  - coverage caveats tied to extraction success rate and route-family skew
+  - route-family-aware screenshot selection
+- Remaining cleanup:
+  - lower-level structured evidence samples can still include mojibake/noisy labels even when the readable report filters most of them

@@ -31,11 +31,8 @@ async def run_agent(
         config.budget.max_states = max_states
     if max_depth is not None:
         config.budget.max_depth = max_depth
-    if headless or config.browser.headless:
-        console.print(
-            "[yellow]Visible browser mode is enforced for interactive auth and verification; ignoring headless setting.[/yellow]"
-        )
-    config.browser.headless = False
+    if headless:
+        config.browser.headless = True
 
     engine = ExplorationEngine(config)
 
@@ -71,14 +68,54 @@ async def run_batch(
     )
 
 
+async def run_target_urls(
+    urls: tuple[str, ...],
+    config_path: str | None,
+    profile: str | None,
+    max_states: int | None,
+    max_depth: int | None,
+    headless: bool,
+    clear: bool,
+) -> None:
+    """Run one to three ad-hoc URLs using the base config as a template."""
+    runner = BatchRunner()
+    summary = await runner.run_urls(
+        urls=list(urls),
+        base_config_path=config_path,
+        profile=profile,
+        max_states=max_states,
+        max_depth=max_depth,
+        headless=headless,
+        clear=clear,
+        max_concurrent_sites=min(3, len(urls)),
+    )
+    console.print(
+        "[green]Ad-hoc batch complete[/green] "
+        f"({summary['successful_sites']}/{summary['site_count']} successful). "
+        f"Comparison: {summary['comparison_report']}"
+    )
+
+
+def _validate_target_urls(urls: tuple[str, ...]) -> None:
+    if not urls:
+        return
+    if len(urls) > 3:
+        raise click.UsageError("Pass at most 3 target URLs at a time.")
+    invalid = [url for url in urls if not url.startswith(("http://", "https://"))]
+    if invalid:
+        joined = ", ".join(invalid)
+        raise click.UsageError(f"Target URLs must start with http:// or https://: {joined}")
+
+
 @click.command()
 @click.option("--config", "-c", default=None, help="Path to config YAML file")
 @click.option("--batch-config", default=None, help="Path to batch YAML file")
 @click.option("--profile", default=None, help="Run profile: default | smoke_fast | demo | full")
 @click.option("--max-states", "-s", type=int, default=None, help="Override max states budget")
 @click.option("--max-depth", "-d", type=int, default=None, help="Override max exploration depth")
-@click.option("--headless", is_flag=True, help="Deprecated for interactive auth flows; browser stays visible")
+@click.option("--headless", is_flag=True, help="Run browser in headless mode")
 @click.option("--clear", is_flag=True, help="Clear output before running")
+@click.argument("targets", nargs=-1)
 def main(
     config: str | None,
     batch_config: str | None,
@@ -87,13 +124,19 @@ def main(
     max_depth: int | None,
     headless: bool,
     clear: bool,
+    targets: tuple[str, ...],
 ) -> None:
     """Frontend Mimic Agent - autonomous website exploration and UI analysis."""
     try:
+        _validate_target_urls(targets)
         if config and batch_config:
             raise click.UsageError("Use either --config or --batch-config, not both.")
+        if batch_config and targets:
+            raise click.UsageError("Use target URLs or --batch-config, not both.")
         if batch_config:
             asyncio.run(run_batch(batch_config, profile, max_states, max_depth, headless, clear))
+        elif targets:
+            asyncio.run(run_target_urls(targets, config, profile, max_states, max_depth, headless, clear))
         else:
             asyncio.run(run_agent(config, profile, max_states, max_depth, headless, clear))
     except KeyboardInterrupt:

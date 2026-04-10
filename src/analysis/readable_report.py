@@ -53,17 +53,31 @@ class ReadableCompetitiveReportGenerator:
             "## Executive Summary",
             self._executive_summary(analysis),
             "",
-            "## Product Readout",
+            "## What The Product Appears To Be",
             self._product_readout(analysis),
             "",
-            "## Key Findings",
+            "## Evidence-Backed Product Pillars",
         ]
 
-        findings = self._key_findings(analysis)
-        if findings:
-            lines.extend(f"- {item}" for item in findings)
+        pillar_lines = self._pillar_lines(analysis)
+        if pillar_lines:
+            lines.extend(f"- {item}" for item in pillar_lines)
         else:
-            lines.append("- The current run produced limited confident findings; a larger budget is recommended.")
+            lines.append("- The current run produced limited confident pillar-level findings; a larger budget is recommended.")
+
+        lines.extend(["", "## User Entry Points"])
+        entry_point_lines = self._entry_point_lines(analysis)
+        if entry_point_lines:
+            lines.extend(f"- {item}" for item in entry_point_lines)
+        else:
+            lines.append("- No strong public entry points were extracted from the current run.")
+
+        lines.extend(["", "## Captured Surfaces"])
+        surface_lines = self._surface_lines(analysis)
+        if surface_lines:
+            lines.extend(f"- {item}" for item in surface_lines)
+        else:
+            lines.append("- No clear route-family pattern was derived from the current captures.")
 
         lines.extend(["", "## Visual Walkthrough"])
         if highlights:
@@ -81,14 +95,7 @@ class ReadableCompetitiveReportGenerator:
             lines.append("")
             lines.append("No screenshot highlights were selected from the current run.")
 
-        lines.extend(["", "## Modules And Workflows"])
-        module_lines = self._module_lines(analysis)
-        if module_lines:
-            lines.extend(f"- {item}" for item in module_lines)
-        else:
-            lines.append("- No stable module breakdown was inferred from the current evidence.")
-
-        lines.extend(["", "## Risks And Follow-Up"])
+        lines.extend(["", "## Coverage Caveats"])
         followups = self._followup_lines(analysis)
         if followups:
             lines.extend(f"- {item}" for item in followups)
@@ -104,72 +111,83 @@ class ReadableCompetitiveReportGenerator:
 
     def _executive_summary(self, analysis: CompetitiveAnalysis) -> str:
         summary = analysis.competitive_summary
-        page_mix = self._format_page_mix(analysis.page_type_distribution)
         states = int(analysis.run_metadata.get("states_captured", 0))
         routes = int(analysis.run_metadata.get("visited_routes", 0))
         budget = int(analysis.run_metadata.get("budget_used", 0))
-        category = self._display_label(summary.product_category_guess)
+        top_family = analysis.route_family_distribution[0] if analysis.route_family_distribution else {}
+        top_family_name = self._display_label(str(top_family.get("name", "")))
+        top_family_share = int(float(top_family.get("share", 0.0)) * 100)
+        concentration = (
+            f" Most captured evidence came from {top_family_name} surfaces ({top_family_share}%)."
+            if top_family_name and top_family_name != "unknown" and top_family_share > 0
+            else ""
+        )
         return (
-            f"This run suggests **{analysis.target}** is primarily a **{category}** surface. "
-            f"The captured evidence leans toward {page_mix}. "
+            f"{summary.product_thesis} "
             f"The agent captured {states} states across {routes} visited routes, "
-            f"using {budget} budgeted captures."
+            f"using {budget} budgeted captures.{concentration}"
         )
 
     def _product_readout(self, analysis: CompetitiveAnalysis) -> str:
         summary = analysis.competitive_summary
-        modules = ", ".join(
-            module.get("name", "unknown")
-            for module in analysis.feature_modules[:4]
-            if module.get("name")
-        )
-        modules_text = modules if modules else "no stable module grouping yet"
+        entry_points = ", ".join(f"`{item}`" for item in analysis.primary_entry_points[:4])
+        entry_text = entry_points if entry_points else "no clear public entry-point set yet"
         return (
-            f"The strongest evidence points to {modules_text}. "
+            f"Category guess is **{self._display_label(summary.product_category_guess)}**. "
+            f"The strongest public entry points observed were {entry_text}. "
             f"Application surface score is **{summary.application_surface_score:.2f}**, "
             f"data density score is **{summary.data_density_score:.2f}**, "
             f"and workflow complexity is **{summary.workflow_complexity_score:.2f}**. "
-            "These scores should be read as comparative hints rather than absolute product grades."
+            "These scores should be read as directional evidence, not absolute product grades."
         )
 
-    def _key_findings(self, analysis: CompetitiveAnalysis) -> list[str]:
-        findings: list[str] = []
-        findings.extend(analysis.competitive_summary.observed_strengths[:3])
-        findings.extend(analysis.competitive_summary.key_differentiators[:2])
-        findings.extend(analysis.competitive_summary.observed_gaps[:2])
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for item in findings:
-            normalized = item.strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            deduped.append(normalized)
-        return deduped
-
-    def _module_lines(self, analysis: CompetitiveAnalysis) -> list[str]:
+    def _pillar_lines(self, analysis: CompetitiveAnalysis) -> list[str]:
         lines: list[str] = []
-        for module in analysis.feature_modules[:6]:
-            name = str(module.get("name", "unknown"))
-            evidence_count = int(module.get("evidence_count", 0))
-            lines.append(f"Module `{name}` appeared in {evidence_count} captured surface(s).")
+        for pillar in analysis.product_pillars[:5]:
+            name = str(pillar.get("name", "unknown"))
+            evidence_count = int(pillar.get("evidence_count", 0))
+            examples = [self._clean_text(str(item)) for item in pillar.get("examples", []) if self._clean_text(str(item))]
+            if examples:
+                example_text = ", ".join(f"`{item}`" for item in examples[:3])
+                lines.append(f"**{name}** appeared repeatedly ({evidence_count} evidence hits), including {example_text}.")
+            else:
+                lines.append(f"**{name}** appeared repeatedly ({evidence_count} evidence hits).")
 
-        if analysis.interaction_patterns:
-            patterns = ", ".join(
-                f"{item.get('name', 'unknown')} ({item.get('count', 0)})"
-                for item in analysis.interaction_patterns[:5]
-            )
-            lines.append(f"Observed interaction patterns: {patterns}.")
+        if analysis.competitive_summary.key_differentiators:
+            for item in analysis.competitive_summary.key_differentiators[:2]:
+                clean = self._clean_text(item)
+                if clean:
+                    lines.append(clean)
+        return lines
 
-        if analysis.data_entities:
-            entities = ", ".join(entity.get("name", "unknown") for entity in analysis.data_entities[:6])
-            lines.append(f"Representative extracted entities or section titles: {entities}.")
+    def _entry_point_lines(self, analysis: CompetitiveAnalysis) -> list[str]:
+        lines: list[str] = []
+        for item in analysis.primary_entry_points[:8]:
+            clean = self._clean_text(item)
+            if clean:
+                lines.append(clean)
+        return lines
 
+    def _surface_lines(self, analysis: CompetitiveAnalysis) -> list[str]:
+        lines: list[str] = []
+        for family in analysis.route_family_distribution[:6]:
+            name = self._display_label(str(family.get("name", "unknown")))
+            evidence_count = int(family.get("count", 0))
+            examples = [self._clean_text(str(item)) for item in family.get("examples", []) if self._clean_text(str(item))]
+            if examples:
+                example_text = ", ".join(f"`{item}`" for item in examples[:3])
+                lines.append(f"`{name}` accounted for {evidence_count} visited capture(s), including {example_text}.")
+            else:
+                lines.append(f"`{name}` accounted for {evidence_count} visited capture(s).")
         return lines
 
     def _followup_lines(self, analysis: CompetitiveAnalysis) -> list[str]:
-        lines = list(analysis.competitive_summary.observed_gaps[:3])
-        lines.extend(analysis.comparison_notes[:2])
+        lines: list[str] = []
+        lines.extend(analysis.coverage_notes[:4])
+        for item in analysis.competitive_summary.observed_gaps[:3]:
+            clean = self._clean_text(item)
+            if clean and clean not in lines:
+                lines.append(clean)
         if not lines:
             lines.append(
                 "Run a larger-budget pass and compare this target against one or two direct peers."
@@ -185,8 +203,8 @@ class ReadableCompetitiveReportGenerator:
             f"This report is grounded in deterministic browser captures, DOM snapshots, and structured evidence. "
             f"The run discovered {total_targets} targets, captured {states} states, "
             f"used {budget} budgeted captures, and reached depth {depth_max}. "
-            "The screenshot walkthrough favors surfaces with higher novelty, stronger evidence density, "
-            "better page-type diversity, and viewport-focused images except where a full-page view is more justified."
+            "The write-up emphasizes public entry points, repeated product themes, route-family coverage, "
+            "and explicit caveats about where the current crawl is likely biased."
         )
 
     def _insights_by_url(self, page_insights: dict[str, dict]) -> dict[str, dict]:
@@ -246,6 +264,7 @@ class ReadableCompetitiveReportGenerator:
             title = self._visual_title(state, snapshot, page_type)
             candidates.append({
                 "url": snapshot.url,
+                "family": self._route_family_from_url(snapshot.url),
                 "page_type": page_type,
                 "score": score,
                 "title": title,
@@ -260,7 +279,20 @@ class ReadableCompetitiveReportGenerator:
         ordered = sorted(candidates, key=lambda item: (-float(item["score"]), str(item["title"])))
         selected: list[dict[str, str]] = []
         seen_urls: set[str] = set()
+        seen_families: set[str] = set()
         seen_page_types: set[str] = set()
+
+        for candidate in ordered:
+            url = str(candidate["url"])
+            family = str(candidate["family"])
+            if url in seen_urls or family in seen_families:
+                continue
+            selected.append(self._stringify_candidate(candidate))
+            seen_urls.add(url)
+            seen_families.add(family)
+            seen_page_types.add(str(candidate["page_type"]))
+            if len(selected) >= self.MAX_VISUAL_HIGHLIGHTS:
+                return selected
 
         for candidate in ordered:
             url = str(candidate["url"])
@@ -275,17 +307,19 @@ class ReadableCompetitiveReportGenerator:
 
         for candidate in ordered:
             url = str(candidate["url"])
+            family = str(candidate["family"])
             if url in seen_urls:
                 continue
             selected.append(self._stringify_candidate(candidate))
             seen_urls.add(url)
+            seen_families.add(family)
             if len(selected) >= self.MAX_VISUAL_HIGHLIGHTS:
                 break
 
         return selected
 
     def _stringify_candidate(self, candidate: dict[str, object]) -> dict[str, str]:
-        return {key: str(value) for key, value in candidate.items() if key != "score"}
+        return {key: str(value) for key, value in candidate.items() if key not in {"score", "family"}}
 
     def _visual_score(
         self,
@@ -383,7 +417,7 @@ class ReadableCompetitiveReportGenerator:
     def _notable_items(self, extraction: dict) -> str:
         items: list[str] = []
         for unit in extraction.get("evidence_units", [])[:12]:
-            text = str(unit.get("normalized_text") or unit.get("raw_text") or "").strip()
+            text = self._clean_text(str(unit.get("normalized_text") or unit.get("raw_text") or "").strip())
             kind = str(unit.get("kind", "")).strip()
             if not text or kind not in {"hero", "cta", "content_section"}:
                 continue
@@ -410,3 +444,18 @@ class ReadableCompetitiveReportGenerator:
 
     def _display_label(self, value: str) -> str:
         return value.replace("_", " ").strip() if value else "unknown"
+
+    def _route_family_from_url(self, url: str) -> str:
+        parsed = urlparse(url)
+        path = parsed.path.strip("/")
+        if not path:
+            return "root"
+        return path.split("/")[0]
+
+    def _clean_text(self, text: str) -> str:
+        normalized = " ".join(text.split()).strip()
+        if not normalized:
+            return ""
+        if any(marker in normalized for marker in ["�", "鈱", "锟"]):
+            return ""
+        return normalized

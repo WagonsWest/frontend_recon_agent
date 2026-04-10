@@ -210,6 +210,7 @@ class VisionConfig(BaseModel):
     api_key_env: str = "OPENAI_API_KEY"
     timeout_ms: int = 15000
     max_image_side: int = 1440
+    max_concurrent_requests: int = 2
     artifact_dir: str = "vision"
     page_insights_dir: str = "page_insights"
 
@@ -261,6 +262,7 @@ class BatchSiteConfig(BaseModel):
 class BatchRunConfig(BaseModel):
     name: str = ""
     output_root: str = "output/batch"
+    max_concurrent_sites: int = 3
     sites: list[BatchSiteConfig] = Field(default_factory=list)
 
 
@@ -280,12 +282,7 @@ class AppConfig(BaseModel):
     layering: LayeringConfig = Field(default_factory=LayeringConfig)
 
 
-def load_config(config_path: str | Path | None = None) -> AppConfig:
-    """Load configuration from YAML file.
-
-    Priority: settings.local.yaml > settings.yaml > defaults
-    Environment variables override: MIMIC_USERNAME, MIMIC_PASSWORD
-    """
+def _resolve_config_path(config_path: str | Path | None = None) -> Path:
     project_root = Path(__file__).parent.parent
     config_dir = project_root / "config"
 
@@ -295,16 +292,10 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         path = config_dir / "settings.local.yaml"
     else:
         path = config_dir / "settings.yaml"
+    return path
 
-    try:
-        with open(path, encoding="utf-8") as f:
-            data: dict[str, Any] = yaml.safe_load(f) or {}
-    except yaml.YAMLError as e:
-        raise SystemExit(f"Invalid YAML in {path}: {e}") from e
-    except FileNotFoundError:
-        raise SystemExit(f"Config file not found: {path}") from None
 
-    config = AppConfig(**data)
+def _finalize_config(config: AppConfig, project_root: Path) -> AppConfig:
     apply_config_layering(config, project_root)
 
     if env_user := os.environ.get("MIMIC_USERNAME"):
@@ -324,6 +315,50 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
             raise SystemExit(f"Permission denied creating directory: {project_root / dir_path}") from None
 
     return config
+
+
+def load_config(config_path: str | Path | None = None) -> AppConfig:
+    """Load configuration from YAML file.
+
+    Priority: settings.local.yaml > settings.yaml > defaults
+    Environment variables override: MIMIC_USERNAME, MIMIC_PASSWORD
+    """
+    project_root = Path(__file__).parent.parent
+    path = _resolve_config_path(config_path)
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data: dict[str, Any] = yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        raise SystemExit(f"Invalid YAML in {path}: {e}") from e
+    except FileNotFoundError:
+        raise SystemExit(f"Config file not found: {path}") from None
+
+    config = AppConfig(**data)
+    return _finalize_config(config, project_root)
+
+
+def load_config_for_url(target_url: str, config_path: str | Path | None = None) -> AppConfig:
+    """Load configuration while overriding the target URL before layering is applied."""
+    project_root = Path(__file__).parent.parent
+    path = _resolve_config_path(config_path)
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data: dict[str, Any] = yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        raise SystemExit(f"Invalid YAML in {path}: {e}") from e
+    except FileNotFoundError:
+        raise SystemExit(f"Config file not found: {path}") from None
+
+    target_data = data.get("target") or {}
+    if not isinstance(target_data, dict):
+        raise SystemExit(f"Config file {path} has invalid target section")
+    target_data["url"] = target_url
+    data["target"] = target_data
+
+    config = AppConfig(**data)
+    return _finalize_config(config, project_root)
 
 
 def load_batch_config(config_path: str | Path) -> tuple[BatchRunConfig, Path]:

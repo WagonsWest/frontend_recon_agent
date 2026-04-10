@@ -7,6 +7,7 @@ import base64
 import json
 import os
 from pathlib import Path
+from typing import ClassVar
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -19,6 +20,8 @@ from src.vision.types import DOMSummary, VisionResult
 
 class VisionClient:
     """Thin wrapper around an OpenAI-compatible multimodal API."""
+
+    _request_semaphores: ClassVar[dict[tuple[int, int], asyncio.Semaphore]] = {}
 
     def __init__(self, config: VisionConfig):
         self.config = config
@@ -33,16 +36,28 @@ class VisionClient:
         if not api_key:
             return VisionResult(notes=f"missing api key in {self.config.api_key_env} or VISION_API_KEY")
 
+        semaphore = self._get_request_semaphore()
         try:
-            return await asyncio.to_thread(
-                self._request_openai_vision,
-                Path(screenshot_path),
-                url,
-                dom_summary,
-                api_key,
-            )
+            async with semaphore:
+                return await asyncio.to_thread(
+                    self._request_openai_vision,
+                    Path(screenshot_path),
+                    url,
+                    dom_summary,
+                    api_key,
+                )
         except Exception as e:
             return VisionResult(notes=f"vision_error: {e}")
+
+    def _get_request_semaphore(self) -> asyncio.Semaphore:
+        limit = max(1, int(self.config.max_concurrent_requests))
+        loop_key = id(asyncio.get_running_loop())
+        cache_key = (loop_key, limit)
+        semaphore = self._request_semaphores.get(cache_key)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(limit)
+            self._request_semaphores[cache_key] = semaphore
+        return semaphore
 
     def _resolve_api_key(self) -> str:
         """Resolve API key from generic or provider-specific environment variables."""

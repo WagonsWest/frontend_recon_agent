@@ -9,11 +9,8 @@ from typing import Any
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Locator
 from playwright.async_api import TimeoutError as PwTimeout
-from rich.console import Console
 
 from src.config import AppConfig
-
-console = Console()
 
 
 class BrowserController:
@@ -36,11 +33,6 @@ class BrowserController:
     async def start(self) -> None:
         self._playwright = await async_playwright().start()
         headless = bool(self.config.browser.headless)
-        if headless:
-            console.print(
-                "[yellow]Visible browser mode is enforced for interactive auth and verification; overriding headless=true.[/yellow]"
-            )
-        headless = False
         self._browser = await self._playwright.chromium.launch(
             headless=headless,
             slow_mo=self.config.browser.slow_mo,

@@ -6,11 +6,11 @@ Ship `frontend_recon_agent` as a credible competitive-analysis demo built on a P
 
 ## Current Phase
 
-Phase 13 - External reference review and architecture comparison
+Phase 16 - Report preparation and demo framing
 
 ## Current Architecture
 
-- Browser runtime: Playwright, local visible browser
+- Browser runtime: Playwright, local browser with configurable visible/headless mode
 - Control loop:
   - observe
   - decide
@@ -56,7 +56,7 @@ Phase 13 - External reference review and architecture comparison
 - [x] Replace unconditional overlay dismissal with overlay triage
 - **Status:** complete
 
-## Active Phase
+## Recent Completed Phases
 
 ### Phase 13 - External Reference Review and Architecture Comparison
 - [x] Inspect `D:\web_access\web-access`
@@ -65,12 +65,39 @@ Phase 13 - External reference review and architecture comparison
 - [x] Decide what ideas are worth borrowing without changing the browser foundation prematurely
 - **Status:** complete
 
+### Phase 14 - Report Insight Quality Improvement
+- [x] Inspect current report generators against existing `artificialanalysis.ai` outputs
+- [x] Identify why current reports feel low-conviction despite decent artifacts
+- [x] Improve the structured competitive-analysis object with thesis, route-family distribution, product pillars, and coverage caveats
+- [x] Rewrite the readable report to emphasize product judgment, evidence, and explicit caveats
+- [x] Add offline report regeneration from existing artifacts
+- [x] Validate the new report layer against existing `artificialanalysis.ai` outputs
+- **Status:** complete
+
+### Phase 15 - Public Runner Ergonomics and Concurrency Control
+- [x] Remove forced `headless=False` overrides so browser mode can be configured again
+- [x] Add bounded multi-site public concurrency for batch runs
+- [x] Preserve independent per-site output roots inside batch execution
+- [x] Add shared vision-request throttling for concurrent public runs
+- [x] Add CLI support for launching one to three target URLs directly
+- [x] Validate code completeness locally without rerunning live sites
+- **Status:** complete
+
+## Active Phase
+
+### Phase 16 - Report Preparation and Demo Framing
+- [ ] Update the discussion brief / report framing to reflect the current runtime more clearly
+- [ ] Summarize the strongest evidence that the project is now more usable for public-site comparison runs
+- [ ] Decide which residual risks to surface explicitly in the external report
+- **Status:** in progress
+
 ## Open Risks
 
 - Registration flow quality is still less proven than public-site analysis.
-- Comparison reporting still needs stronger analyst-style quality.
+- Comparison reporting is better, but still needs calibration against strong human-written analyst memos.
 - No automated regression suite exists for the runtime-critical paths.
 - Competitive-analysis framing is still not fully consistent across all docs and outputs.
+- The new direct-URL runner is convenient, but it still inherits the assumptions of the chosen base config template.
 
 ## Decision Filters
 
