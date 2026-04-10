@@ -15,9 +15,9 @@ output_dataset/
 # Site-specific scripts
 scripts/
 
-# Secrets
+# Secrets and local config
 .env
-config/settings.local.yaml
+config/
 
 # IDE
 .vscode/
@@ -27,7 +27,7 @@ config/settings.local.yaml
 .DS_Store
 Thumbs.db
 
-# Planning files (optional — remove these lines if you want to track them)
-# task_plan.md
-# findings.md
-# progress.md
+# Planning files
+task_plan.md
+findings.md
+progress.md

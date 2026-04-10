@@ -264,17 +264,32 @@ class AppConfig(BaseModel):
     layering: LayeringConfig = Field(default_factory=LayeringConfig)
 
 
-def _resolve_config_path(config_path: str | Path | None = None) -> Path:
+def _resolve_config_path(config_path: str | Path | None = None) -> Path | None:
     project_root = Path(__file__).parent.parent
     config_dir = project_root / "config"
 
     if config_path:
-        path = Path(config_path)
+        path: Path | None = Path(config_path)
     elif (config_dir / "settings.local.yaml").exists():
         path = config_dir / "settings.local.yaml"
-    else:
+    elif (config_dir / "settings.yaml").exists():
         path = config_dir / "settings.yaml"
+    else:
+        path = None
     return path
+
+
+def _load_yaml_config(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        raise SystemExit(f"Invalid YAML in {path}: {e}") from e
+    except FileNotFoundError:
+        raise SystemExit(f"Config file not found: {path}") from None
 
 
 def _finalize_config(config: AppConfig, project_root: Path) -> AppConfig:
@@ -302,20 +317,17 @@ def _finalize_config(config: AppConfig, project_root: Path) -> AppConfig:
 def load_config(config_path: str | Path | None = None) -> AppConfig:
     """Load configuration from YAML file.
 
-    Priority: settings.local.yaml > settings.yaml > defaults
+    Priority: explicit config > settings.local.yaml > settings.yaml
     Environment variables override: MIMIC_USERNAME, MIMIC_PASSWORD
     """
     project_root = Path(__file__).parent.parent
     path = _resolve_config_path(config_path)
+    if path is None:
+        raise SystemExit(
+            "No config file found. Pass --config PATH or create a local config/settings.local.yaml."
+        )
 
-    try:
-        with open(path, encoding="utf-8") as f:
-            data: dict[str, Any] = yaml.safe_load(f) or {}
-    except yaml.YAMLError as e:
-        raise SystemExit(f"Invalid YAML in {path}: {e}") from e
-    except FileNotFoundError:
-        raise SystemExit(f"Config file not found: {path}") from None
-
+    data = _load_yaml_config(path)
     config = AppConfig(**data)
     return _finalize_config(config, project_root)
 
@@ -324,15 +336,7 @@ def load_config_for_url(target_url: str, config_path: str | Path | None = None) 
     """Load configuration while overriding the target URL before layering is applied."""
     project_root = Path(__file__).parent.parent
     path = _resolve_config_path(config_path)
-
-    try:
-        with open(path, encoding="utf-8") as f:
-            data: dict[str, Any] = yaml.safe_load(f) or {}
-    except yaml.YAMLError as e:
-        raise SystemExit(f"Invalid YAML in {path}: {e}") from e
-    except FileNotFoundError:
-        raise SystemExit(f"Config file not found: {path}") from None
-
+    data = _load_yaml_config(path)
     target_data = data.get("target") or {}
     if not isinstance(target_data, dict):
         raise SystemExit(f"Config file {path} has invalid target section")

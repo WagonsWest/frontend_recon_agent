@@ -90,13 +90,13 @@ playwright install chromium
 ### Single Config Run
 
 ```bash
-python -m src.cli --config config/smoke_test_public.yaml --clear
+python -m src.cli --config local/public.yaml --clear
 ```
 
 ### Login-Gated UX Review
 
 ```bash
-python -m src.cli --config config/smoke_test_ponder_ux.yaml --clear
+python -m src.cli --config local/ponder.yaml --clear
 ```
 
 If the product requires manual help during login or verification, keep the visible browser open and continue in the terminal when prompted.
@@ -112,25 +112,30 @@ python -m src.cli https://example.com https://example.org
 You can also combine direct URLs with a base config:
 
 ```bash
-python -m src.cli --config config/smoke_test_public.yaml --headless https://example.com
+python -m src.cli --config local/base.yaml --headless https://example.com
 ```
 
 ### Batch Runs
 
 ```bash
-python -m src.cli --batch-config config/smoke_test_batch.yaml
+python -m src.cli --batch-config local/batch.yaml
 ```
 
 Batch mode writes per-site UX outputs and records their paths in `batch_summary.json`.
 
 ## Config Model
 
-Configuration is loaded from:
+The repository does not ship tracked runtime YAML files.
 
-1. `config/settings.local.yaml` if present
-2. `config/settings.yaml`
-3. the file passed via `--config`
-4. environment overrides
+Keep your site configs locally, either in an ignored folder such as `config/` or anywhere else on disk, and pass them with `--config` or `--batch-config`.
+
+Configuration comes from:
+
+1. the file passed via `--config`
+2. ignored local `config/settings.local.yaml` if present
+3. environment overrides
+
+Direct URL mode can also start from in-memory defaults when no config file is provided.
 
 Environment overrides:
 
@@ -163,6 +168,36 @@ Important config sections:
   - profile and runtime feature toggles
 - `output`
   - screenshot, DOM, report, and artifact roots
+
+### Minimal Local Config
+
+```yaml
+target:
+  url: https://example.com
+
+login:
+  mode: public
+
+budget:
+  max_states: 8
+  max_depth: 2
+
+output:
+  screenshots_dir: output/example/screenshots
+  dom_snapshots_dir: output/example/dom_snapshots
+  reports_dir: output/example/reports
+  artifacts_dir: output/example/artifacts
+```
+
+### Minimal Batch Config
+
+```yaml
+name: demo-batch
+output_root: output/batch
+sites:
+  - name: example
+    config: ../local/example.yaml
+```
 
 ## Login Modes
 
@@ -233,7 +268,7 @@ The report is intended to read like a reviewer memo, not a raw crawler dump.
 You can regenerate the UX report and supporting runtime artifacts from an existing run without rerunning the browser:
 
 ```bash
-python -m src.tools.regenerate_reports --config config/smoke_test_ponder_ux.yaml
+python -m src.tools.regenerate_reports --config local/ponder.yaml
 ```
 
 This is useful when:
@@ -241,17 +276,6 @@ This is useful when:
 - the captured artifacts are already good
 - the report logic changed
 - you want to iterate on reporting without paying the runtime cost again
-
-## Example Configs
-
-Useful configs in `config/`:
-
-- `smoke_test_public.yaml`
-- `smoke_test_public_fast.yaml`
-- `smoke_test_lmarena_demo.yaml`
-- `smoke_test_ponder_ux.yaml`
-- `smoke_test_ponder_ux_deep.yaml`
-- `smoke_test_batch.yaml`
 
 ## Practical Workflow
 
