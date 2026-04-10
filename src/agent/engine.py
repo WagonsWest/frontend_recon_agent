@@ -1,8 +1,9 @@
-"""Exploration engine — state machine loop that orchestrates the agent."""
+"""Exploration engine 閳?state machine loop that orchestrates the agent."""
 
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 import re
 import time
 from datetime import datetime
@@ -26,13 +27,7 @@ from src.observer.extractor import CandidateExtractor
 from src.observer.fingerprint import DOMFingerprinter
 from src.observer.novelty import NoveltyScorer
 from src.analyzer.page_analyzer import PageAnalyzer
-from src.analysis.competitive_report import CompetitiveReportGenerator
-from src.analysis.readable_report import ReadableCompetitiveReportGenerator
-from src.analysis.synthesis_client import CompetitiveSynthesisClient
 from src.artifacts.manager import ArtifactManager
-from src.artifacts.inventory import InventoryGenerator
-from src.artifacts.sitemap import SitemapGenerator
-from src.artifacts.report import ReportGenerator
 from src.extraction.engine import ExtractionEngine
 from src.extraction.types import EvidencePaths
 from src.vision.client import VisionClient
@@ -58,8 +53,6 @@ class ExplorationEngine:
         self.fingerprinter = DOMFingerprinter()
         self.novelty_scorer = NoveltyScorer(self.fingerprinter)
         self.analyzer = PageAnalyzer()
-        self.competitive = CompetitiveReportGenerator()
-        self.synthesis = CompetitiveSynthesisClient(config.synthesis)
         self.artifacts = ArtifactManager(config)
         self.extraction = ExtractionEngine()
         self.vision = VisionClient(config.vision)
@@ -124,13 +117,8 @@ class ExplorationEngine:
             # AUTHENTICATE
             await self._phase_authenticate()
 
-            # Navigate to dashboard if configured
-            dashboard_url = self.config.target.dashboard_url
-            if dashboard_url:
-                await self.controller.goto(dashboard_url)
-
-            # Create initial target for the current page
-            current_url = await self.controller.get_url()
+            # Prepare the post-auth page before exploration starts.
+            current_url = await self._stabilize_post_auth_entry()
             root_target = ExplorationTarget.create(
                 target_type=TargetType.ROUTE,
                 locator=current_url,
@@ -188,7 +176,7 @@ class ExplorationEngine:
 
         return self.state
 
-    # ── Phase implementations ──
+    # 閳光偓閳光偓 Phase implementations 閳光偓閳光偓
 
     async def _phase_initialize(self) -> None:
         """INITIALIZE: Launch browser, set up output dirs."""
@@ -222,6 +210,57 @@ class ExplorationEngine:
             await asyncio.sleep(3)
 
         raise RuntimeError("Authentication failed after 3 attempts. Check credentials in config.")
+
+    async def _stabilize_post_auth_entry(self) -> str:
+        """Prepare the post-auth page and verify the session before exploration begins."""
+        preferred_url = self.config.target.dashboard_url or self.config.target.url
+        current_url = await self.controller.get_url()
+
+        for attempt in range(2):
+            if preferred_url and self._normalize_url(current_url) != self._normalize_url(preferred_url):
+                await self.controller.goto(preferred_url)
+                current_url = await self.controller.get_url()
+
+            await self._prepare_page_for_observation(current_url)
+            current_url = await self.controller.get_url()
+            if not await self.authenticator.check_session():
+                self.logger.log(
+                    AgentPhase.AUTHENTICATE,
+                    "post_auth_session_check",
+                    current_url,
+                    "retry",
+                    "session still looks unauthenticated; re-login",
+                )
+                if not await self.authenticator.re_login():
+                    break
+                current_url = await self.controller.get_url()
+                continue
+            dom_summary = await self._build_dom_summary()
+            vision_result = (
+                await self._understand_current_page(current_url, dom_summary)
+                if self.config.vision.enabled else VisionResult()
+            )
+            resolved_page_type = (
+                vision_result.page_type
+                if vision_result.page_type != "unknown"
+                else self._infer_dom_page_type(current_url, dom_summary)
+            )
+            hint_types = Counter(
+                str(hint.get("hint_type", "")).strip().lower()
+                for hint in vision_result.interaction_hints
+                if isinstance(hint, dict) and str(hint.get("hint_type", "")).strip()
+            )
+
+            self.logger.log(
+                AgentPhase.AUTHENTICATE,
+                "stabilize_post_auth",
+                current_url,
+                "success",
+                f"attempt={attempt + 1}, page_type={resolved_page_type}, hint_types={dict(hint_types)}",
+            )
+            return current_url
+
+        return await self.controller.get_url()
 
     async def _phase_observe(self) -> None:
         """OBSERVE: Extract route candidates from current page, add to frontier."""
@@ -262,8 +301,11 @@ class ExplorationEngine:
             observe_breakdown["vision_understanding_ms"] = int((time.monotonic() - start) * 1000)
 
             start = time.monotonic()
-            route_candidates = self._rerank_route_candidates(
-                [c for c in candidates if c.target_type == TargetType.ROUTE], vision_result
+            route_candidates = await self._rerank_route_candidates(
+                current_url,
+                dom_summary,
+                vision_result,
+                [c for c in candidates if c.target_type == TargetType.ROUTE],
             )
             observe_breakdown["route_rerank_ms"] = int((time.monotonic() - start) * 1000)
 
@@ -279,7 +321,7 @@ class ExplorationEngine:
 
             start = time.monotonic()
             planned = (
-                await self._plan_page_actions(current_url)
+                await self._plan_page_actions(current_url, dom_summary, vision_result)
                 if self.config.run.enable_page_action_planning else []
             )
             observe_breakdown["page_action_planning_ms"] = int((time.monotonic() - start) * 1000)
@@ -424,116 +466,12 @@ class ExplorationEngine:
         return False
 
     async def _prepare_page_for_observation(self, current_url: str) -> None:
-        """Passively triage overlays before observing a public page."""
-        if self.config.run.enable_interaction_exploration:
-            return
-        if self._looks_like_auth_surface(current_url):
-            return
-        if not await self.controller.is_modal_open():
-            return
-
-        overlay_decision = await self._classify_visible_overlay()
-        action = str(overlay_decision.get("action", "keep"))
-        reason = str(overlay_decision.get("reason", "unclassified_overlay"))
-        self.logger.log(
-            AgentPhase.OBSERVE,
-            f"overlay_{action}",
-            current_url,
-            "success",
-            reason,
-        )
-        if action != "dismiss":
-            return
-
-        await self.controller.close_overlays()
-        await asyncio.sleep(min(self.config.crawl.wait_for_spa / 1000, 1.0))
+        """Leave the page untouched before observation so the model sees the real surface."""
+        return
 
     async def _classify_visible_overlay(self) -> dict[str, object]:
-        """Lightweight overlay triage so product-significant dialogs are preserved."""
-        overlay = await self.controller.evaluate(
-            """
-            () => {
-              const selectors = [
-                '[role="dialog"]',
-                '[aria-modal="true"]',
-                '.el-dialog',
-                '.el-drawer',
-                '.ant-modal-wrap',
-                '.modal.show'
-              ];
-
-              const isVisible = (el) => {
-                if (!el) return false;
-                const style = window.getComputedStyle(el);
-                const rect = el.getBoundingClientRect();
-                if (!rect.width || !rect.height) return false;
-                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-                return true;
-              };
-
-              const candidates = [];
-              for (const selector of selectors) {
-                for (const el of document.querySelectorAll(selector)) {
-                  if (isVisible(el)) {
-                    candidates.push(el);
-                  }
-                }
-              }
-
-              if (!candidates.length) {
-                return null;
-              }
-
-              const top = candidates
-                .sort((a, b) => {
-                  const areaA = a.getBoundingClientRect().width * a.getBoundingClientRect().height;
-                  const areaB = b.getBoundingClientRect().width * b.getBoundingClientRect().height;
-                  return areaB - areaA;
-                })[0];
-
-              const text = (top.innerText || top.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 400);
-              const buttonText = Array.from(
-                top.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]')
-              )
-                .map((el) => (el.innerText || el.textContent || el.getAttribute('value') || '').replace(/\\s+/g, ' ').trim())
-                .filter(Boolean)
-                .slice(0, 12);
-
-              return {
-                text,
-                buttonText
-              };
-            }
-            """,
-            default=None,
-        )
-        if not isinstance(overlay, dict):
-            return {"action": "keep", "reason": "overlay_detected_but_unclassified"}
-
-        text = str(overlay.get("text", "")).lower()
-        button_texts = overlay.get("buttonText", [])
-        if not isinstance(button_texts, list):
-            button_texts = []
-        button_text = " ".join(str(item).lower() for item in button_texts)
-        haystack = f"{text} {button_text}".strip()
-        if not haystack:
-            return {"action": "keep", "reason": "overlay_without_readable_text"}
-
-        high_value_terms = [
-            "sign up", "signup", "register", "create account", "get started",
-            "continue", "verification", "verify", "magic link", "log in",
-            "login", "sign in", "onboarding", "welcome",
-        ]
-        low_value_terms = [
-            "cookie", "cookies", "privacy", "newsletter", "subscribe",
-            "accept all", "reject all", "manage preferences", "close",
-        ]
-
-        if any(term in haystack for term in high_value_terms):
-            return {"action": "keep", "reason": "high_value_overlay"}
-        if any(term in haystack for term in low_value_terms):
-            return {"action": "dismiss", "reason": "low_value_overlay"}
-        return {"action": "keep", "reason": "unclassified_overlay"}
+        """Overlay triage is disabled; exploration should stay model-led."""
+        return {"action": "keep", "reason": "overlay_triage_disabled"}
 
     def _phase_decide_next_action(self) -> ActionDecision | None:
         """SELECT_ACTION: Pick the next action in the agent loop."""
@@ -546,6 +484,14 @@ class ExplorationEngine:
             return None
 
         decision = self._select_best_pending_decision()
+        frontier_candidate = self._peek_frontier_target()
+        if (
+            decision is not None
+            and frontier_candidate is not None
+            and self._should_prefer_route_over_decision(frontier_candidate, decision)
+        ):
+            self.state.pending_decisions.appendleft(decision)
+            decision = None
         if decision is not None:
             self.logger.log(
                 AgentPhase.SELECT_ACTION,
@@ -573,7 +519,7 @@ class ExplorationEngine:
         if target is None:
             self.logger.log(AgentPhase.SELECT_ACTION, "frontier_empty", "", "success",
                           "no more routes or decisions to explore")
-            console.print("[yellow]Frontier empty — exploration complete[/yellow]")
+            console.print("[yellow]Frontier empty 閳?exploration complete[/yellow]")
             return None
 
         self.logger.log(AgentPhase.SELECT_ACTION, "selected_target", target.label, "success",
@@ -587,23 +533,36 @@ class ExplorationEngine:
         )
 
     def _should_consume_deferred_routes(self) -> bool:
-        """Only consume deferred routes when the task explicitly calls for them."""
-        public_only_mode = (
-            not self.config.task.allow_login_flows
-            and not self.config.task.allow_registration_flows
+        """Deferred-route policy is disabled; candidate ordering is model-led."""
+        return True
+
+    def _peek_frontier_target(self) -> ExplorationTarget | None:
+        for target_id in self.state.frontier:
+            if target_id in self.state.visited or target_id in self.state.skipped:
+                continue
+            target = self.state.targets.get(target_id)
+            if target is not None:
+                return target
+        return None
+
+    def _should_prefer_route_over_decision(self, target: ExplorationTarget, decision: ActionDecision) -> bool:
+        if target.target_type != TargetType.ROUTE:
+            return False
+        if decision.action_type == ActionType.FILL_AND_SUBMIT_FORM:
+            return False
+
+        current_state = self.state.states.get(self.state.current_state_id or "")
+        current_url = self._normalize_url(current_state.url) if current_state else ""
+        same_url_states = sum(
+            1 for snapshot in self.state.states.values()
+            if self._normalize_url(snapshot.url) == current_url
         )
-        if not public_only_mode:
-            return True
-        goal_terms = {self._canonicalize_policy_term(term) for term in self._goal_terms()}
-        auth_terms = {
-            self._canonicalize_policy_term(hint)
-            for hint in self.config.exploration.auth_risk_path_hints
-        }
-        interactive_terms = {
-            self._canonicalize_policy_term(hint)
-            for hint in self.config.exploration.interactive_risk_path_hints
-        }
-        return bool(goal_terms & (auth_terms | interactive_terms))
+        if same_url_states < 2:
+            return False
+
+        route_score = self._score_route_target(target)
+        decision_score = self._score_decision(decision)
+        return len(self.state.pending_decisions) >= 4 and route_score >= decision_score + 2
 
     async def _execute_decision(self, decision: ActionDecision) -> StateSnapshot | None:
         """Execute a planned decision from the agent loop."""
@@ -621,7 +580,7 @@ class ExplorationEngine:
         """Navigate to a route and capture it. Routes are always captured."""
         return await self.executor.execute_route(target)
         step = self.state.next_step()
-        console.print(f"\n[bold cyan]Step {step}: route → {target.label}[/bold cyan]")
+        console.print(f"\n[bold cyan]Step {step}: route 閳?{target.label}[/bold cyan]")
 
         # Navigate
         success = False
@@ -687,7 +646,7 @@ class ExplorationEngine:
         return
         """Explore all interactions on the current page inline (no frontier).
 
-        Order: action dropdowns → dropdown items → add buttons → tabs → expand rows.
+        Order: action dropdowns 閳?dropdown items 閳?add buttons 閳?tabs 閳?expand rows.
         Each capture goes through novelty check.
         """
         page = self.controller.page
@@ -703,7 +662,7 @@ class ExplorationEngine:
 
         console.print(f"[yellow]  Exploring interactions on: {route_label}[/yellow]")
 
-        # ── 1. Action dropdown → click each item ──
+        # 閳光偓閳光偓 1. Action dropdown 閳?click each item 閳光偓閳光偓
         action_loc, action_count = await self.controller.find_first_visible(icfg.action_button_selectors)
         if action_loc and action_count > 0:
             coverage.action_buttons_found = action_count
@@ -774,7 +733,7 @@ class ExplorationEngine:
                         if await self.controller.is_modal_open():
                             await self.controller.close_overlays()
                         else:
-                            # Might have navigated to a new page — go back
+                            # Might have navigated to a new page 閳?go back
                             current_url = await self.controller.get_url()
                             if self._normalize_url(current_url) != self._normalize_url(
                                     await self._get_route_url(route_target)):
@@ -789,7 +748,7 @@ class ExplorationEngine:
                 console.print(f"[dim]    Action dropdown failed: {e}[/dim]")
                 await self.controller.close_overlays()
 
-        # ── 2. Add/create button → modal ──
+        # 閳光偓閳光偓 2. Add/create button 閳?modal 閳光偓閳光偓
         add_loc, _ = await self.controller.find_first_visible(icfg.add_button_selectors)
         if add_loc:
             coverage.add_buttons_found += 1
@@ -810,7 +769,7 @@ class ExplorationEngine:
                 console.print(f"[dim]    Add button failed: {e}[/dim]")
                 await self.controller.close_overlays()
 
-        # ── 3. Expandable rows ──
+        # 閳光偓閳光偓 3. Expandable rows 閳光偓閳光偓
         expand_loc, expand_count = await self.controller.find_first_visible(icfg.expand_selectors)
         if expand_loc and expand_count > 0:
             coverage.expand_rows_found = expand_count
@@ -827,7 +786,7 @@ class ExplorationEngine:
             except Exception:
                 pass
 
-        # ── 4. Tabs ──
+        # 閳光偓閳光偓 4. Tabs 閳光偓閳光偓
         try:
             tabs = page.locator(icfg.tab_selector)
             tab_count = await tabs.count()
@@ -880,7 +839,7 @@ class ExplorationEngine:
 
         if novelty < threshold:
             self.novelty_scorer.register(html, fingerprint)
-            console.print(f"[dim]    Low novelty ({novelty:.2f}) — skipped[/dim]")
+            console.print(f"[dim]    Low novelty ({novelty:.2f}) 閳?skipped[/dim]")
             self.logger.log(AgentPhase.EVAL_NOVELTY, "skip_interaction", label,
                           "skipped", f"novelty={novelty:.2f}")
             return "skipped_novelty"
@@ -1041,152 +1000,6 @@ class ExplorationEngine:
     async def _phase_finalize(self) -> None:
         await self.finalizer.phase_finalize()
         return
-        """FINALIZE: Generate all artifacts and report."""
-        self.state.phase = AgentPhase.FINALIZE
-        end_time = datetime.now().isoformat()
-
-        console.print("\n[bold]Generating artifacts...[/bold]")
-
-        with self.logger.timed(AgentPhase.FINALIZE, "generate_inventory") as ctx:
-            inventory = InventoryGenerator().generate(self.state)
-            path = self.artifacts.save_json("inventory.json", inventory)
-            ctx["reason"] = f"{len(inventory)} entries → {path.name}"
-
-        with self.logger.timed(AgentPhase.FINALIZE, "generate_sitemap") as ctx:
-            sitemap = SitemapGenerator().generate(self.state)
-            path = self.artifacts.save_json("sitemap.json", sitemap)
-            ctx["reason"] = f"{sitemap['stats']['total_nodes']} nodes → {path.name}"
-
-        with self.logger.timed(AgentPhase.FINALIZE, "generate_coverage") as ctx:
-            from dataclasses import asdict
-            coverage_data = {tid: asdict(cov) for tid, cov in self.state.coverage.items()}
-            path = self.artifacts.save_json("coverage.json", coverage_data)
-            pages_with_gaps = sum(1 for c in self.state.coverage.values() if c.has_unexplored)
-            ctx["reason"] = f"{len(coverage_data)} pages, {pages_with_gaps} with gaps → {path.name}"
-
-        with self.logger.timed(AgentPhase.FINALIZE, "generate_site_memory") as ctx:
-            path = self.artifacts.save_json("site_memory.json", self._site_memory)
-            ctx["reason"] = f"site memory → {path.name}"
-
-        with self.logger.timed(AgentPhase.FINALIZE, "generate_extraction_artifacts") as ctx:
-            extraction_rows = list(self._extraction_results.values())
-            summary = self._build_extraction_summary(extraction_rows)
-            failures = [
-                row for row in extraction_rows
-                if row.get("status") in {"failed", "empty"} or row.get("error")
-            ]
-            self.artifacts.save_jsonl("dataset.jsonl", extraction_rows)
-            self.artifacts.save_json("dataset_summary.json", summary)
-            self.artifacts.save_json("extraction_failures.json", failures)
-            ctx["reason"] = (
-                f"{summary['total_results']} results, "
-                f"{summary['successful_results']} successful"
-            )
-
-        with self.logger.timed(AgentPhase.FINALIZE, "generate_report") as ctx:
-            report = ReportGenerator().generate(
-                self.state,
-                self._start_time,
-                end_time,
-                self._analysis_results,
-                self._page_insights,
-                self._extraction_results,
-            )
-            path = self.artifacts.save_text("exploration_report.md", report)
-            ctx["reason"] = f"report → {path.name}"
-
-        with self.logger.timed(AgentPhase.FINALIZE, "generate_competitive_analysis") as ctx:
-            competitive = self.competitive.generate(
-                self.state,
-                self._analysis_results,
-                self._page_insights,
-                self._extraction_results,
-            )
-            self.artifacts.save_json("competitive_analysis.json", competitive.model_dump())
-            structured_markdown = self.competitive.generate_markdown(competitive)
-            self.artifacts.save_text(
-                self.config.synthesis.structured_report_filename_md,
-                structured_markdown,
-            )
-            readable_markdown = ReadableCompetitiveReportGenerator().generate(
-                self.state,
-                competitive,
-                self._page_insights,
-                self._extraction_results,
-                self.artifacts.reports_dir(),
-            )
-            self.artifacts.save_text(
-                self.config.synthesis.readable_report_filename_md,
-                readable_markdown,
-            )
-
-            synthesized = await self.synthesis.synthesize(
-                competitive.model_dump(),
-                self._page_insights,
-                self._extraction_results,
-            )
-            if self.config.synthesis.enabled:
-                self.artifacts.save_json(
-                    self.config.synthesis.artifact_filename_json,
-                    synthesized.model_dump(),
-                )
-            if self.config.synthesis.enabled and synthesized.markdown_report:
-                self.artifacts.save_text(
-                    self.config.synthesis.artifact_filename_md,
-                    synthesized.markdown_report,
-                )
-            else:
-                self.artifacts.save_text(
-                    self.config.synthesis.artifact_filename_md,
-                    structured_markdown,
-                )
-            ctx["reason"] = (
-                f"category={competitive.competitive_summary.product_category_guess}, "
-                f"modules={len(competitive.feature_modules)}"
-            )
-
-        if self.config.run.enable_timing_summary:
-            timing_path = self.artifacts.save_json("run_timing_summary.json", self.logger.summary())
-            self.logger.log(
-                AgentPhase.FINALIZE,
-                "generate_timing_summary",
-                "",
-                "success",
-                f"timing summary -> {timing_path.name}",
-            )
-            observe_breakdown_path = self.artifacts.save_json(
-                "run_observe_breakdown.json",
-                self._observe_breakdown_summary(),
-            )
-            self.logger.log(
-                AgentPhase.FINALIZE,
-                "generate_observe_breakdown",
-                "",
-                "success",
-                f"observe breakdown -> {observe_breakdown_path.name}",
-            )
-
-        stats = self.state.get_stats()
-        console.print(Panel.fit(
-            f"[bold green]Exploration Complete[/bold green]\n\n"
-            f"States captured: {stats['states_captured']}\n"
-            f"Targets discovered: {stats['total_targets']}\n"
-            f"Visited: {stats['visited']} | Skipped: {stats['skipped']} | Failed: {stats['failed']}\n"
-            f"Budget used: {stats['budget_used']} / {self.state.budget_total}\n"
-            f"Steps: {stats['steps']}\n\n"
-            f"Artifacts:\n"
-            f"  inventory.json, sitemap.json, run_log.jsonl\n"
-            f"  run_timing_summary.json\n"
-            f"  run_observe_breakdown.json\n"
-            f"  exploration_report.md\n"
-            f"  {self.config.synthesis.readable_report_filename_md}\n"
-            f"  {len(self._analysis_results)} state analyses\n"
-            f"  {len(self._page_insights)} page insights\n"
-            f"  {len(self._extraction_results)} extraction results\n"
-            f"  competitive_analysis.json / .md",
-            title="Summary",
-        ))
-
     def _observe_breakdown_summary(self) -> dict[str, object]:
         return self.finalizer.observe_breakdown_summary()
         entries = list(self._observe_breakdown_entries)
@@ -1217,7 +1030,7 @@ class ExplorationEngine:
             "entries": entries,
         }
 
-    # ── Helpers ──
+    # 閳光偓閳光偓 Helpers 閳光偓閳光偓
 
     async def _build_dom_summary(self) -> DOMSummary:
         """Build a lightweight DOM summary for vision understanding."""
@@ -1254,11 +1067,21 @@ class ExplorationEngine:
             self.logger.log(AgentPhase.OBSERVE, "vision_understanding", current_url, "failed", str(e))
             return VisionResult(notes=f"vision_failed: {e}")
 
-    async def _plan_page_actions(self, current_url: str) -> list[ActionDecision]:
+    async def _plan_page_actions(
+        self,
+        current_url: str,
+        dom_summary: DOMSummary | None = None,
+        vision_result: VisionResult | None = None,
+    ) -> list[ActionDecision]:
         """Plan page-level next actions from the current visible state."""
         decisions: list[ActionDecision] = []
         url_key = self._normalize_url(current_url)
-        auth_surface = self._looks_like_auth_surface(current_url)
+        resolved_dom_summary = dom_summary or await self._build_dom_summary()
+        resolved_vision = vision_result or VisionResult()
+        resolved_page_type = resolved_vision.page_type
+        if resolved_page_type == "unknown":
+            resolved_page_type = self._infer_dom_page_type(current_url, resolved_dom_summary)
+        auth_surface = resolved_page_type == "auth"
 
         # Non-active tabs
         try:
@@ -1313,38 +1136,17 @@ class ExplorationEngine:
         except Exception:
             pass
 
-        # Generic primary CTA planning for onboarding-like flows
         if not auth_surface:
             try:
-                cta_locator = self.controller.page.locator("button, a, [role='button']")
-                cta_count = await cta_locator.count()
-                keywords = (
-                    "sign up", "register", "create account", "get started", "continue",
-                    "next", "start", "try now", "login", "sign in"
+                click_candidates = await self._collect_click_action_candidates(current_url)
+                decisions.extend(
+                    await self._rank_page_action_candidates(
+                        current_url,
+                        resolved_dom_summary,
+                        resolved_vision,
+                        click_candidates,
+                    )
                 )
-                for i in range(min(cta_count, 20)):
-                    button = cta_locator.nth(i)
-                    if not await button.is_visible():
-                        continue
-                    text = " ".join(((await button.text_content()) or "").split()).strip()
-                    lower = text.lower()
-                    href = ((await button.get_attribute("href")) or "").lower()
-                    if not text or not any(keyword in lower for keyword in keywords):
-                        continue
-                    if any(token in href for token in [".pdf", "terms", "privacy", "legal"]):
-                        continue
-                    decisions.append(ActionDecision(
-                        action_type=ActionType.CLICK_ACTION,
-                        target_id=self.state.current_target_id,
-                        label=text,
-                        reason="primary onboarding/auth CTA discovered",
-                        dedup_key=f"cta:{url_key}:{text}:{i}",
-                        metadata={
-                            "selector": "button, a, [role='button']",
-                            "index": i,
-                            "context": "step_transition",
-                        },
-                    ))
             except Exception:
                 pass
 
@@ -1358,6 +1160,152 @@ class ExplorationEngine:
                 pass
 
         return decisions
+
+    async def _plan_workspace_actions(self, current_url: str) -> list[ActionDecision]:
+        """Legacy helper kept only for compatibility while model-led planning takes over."""
+        return []
+
+    async def _collect_click_action_candidates(self, current_url: str) -> list[ActionDecision]:
+        """Collect broad visible click candidates and defer prioritization to the model."""
+        selector = "button, a, [role='button'], [role='tab'], [aria-haspopup='menu']"
+        specs = await self.controller.evaluate(
+            """
+            (selector) => {
+              const isVisible = (el) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                if (!rect.width || !rect.height) return false;
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                if (el.closest('[hidden], [aria-hidden="true"]')) return false;
+                return true;
+              };
+
+              return Array.from(document.querySelectorAll(selector)).map((el, index) => {
+                if (!isVisible(el)) return null;
+                const text = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+                const title = (el.getAttribute('title') || '').trim();
+                const href = (el.getAttribute('href') || '').trim();
+                const role = (el.getAttribute('role') || '').trim().toLowerCase();
+                let region = 'other';
+                if (el.closest('aside, nav, [role="navigation"]')) {
+                  region = 'nav';
+                } else if (el.closest('main, [role="main"]')) {
+                  region = 'main';
+                } else if (el.closest('[role="dialog"], [aria-modal="true"]')) {
+                  region = 'modal';
+                }
+                return {
+                  index,
+                  text,
+                  ariaLabel,
+                  title,
+                  href,
+                  role,
+                  region,
+                  tag: el.tagName.toLowerCase(),
+                  hasPopup: (el.getAttribute('aria-haspopup') || '').trim(),
+                };
+              }).filter(Boolean);
+            }
+            """,
+            selector,
+            default=[],
+        )
+
+        if not specs:
+            return []
+
+        url_key = self._normalize_url(current_url)
+        destructive = tuple(keyword.lower() for keyword in self.config.exploration.destructive_keywords)
+        decisions: list[ActionDecision] = []
+        seen: set[str] = set()
+
+        for spec in specs[:30]:
+            label = " ".join(
+                str(spec.get(key, "") or "") for key in ("text", "ariaLabel", "title")
+            ).strip()
+            label = " ".join(label.split())
+            if not label or len(label) > 80:
+                continue
+
+            lowered = label.lower()
+            href = str(spec.get("href", "") or "").strip()
+            href_lower = href.lower()
+            if any(keyword and keyword in lowered for keyword in destructive):
+                continue
+            if href_lower.startswith(("mailto:", "javascript:")) or href_lower.endswith((".pdf", ".zip")):
+                continue
+
+            role = str(spec.get("role", "") or "").lower()
+            region = str(spec.get("region", "") or "other").lower()
+            action_type = ActionType.SWITCH_TAB if role == "tab" else ActionType.CLICK_ACTION
+            context = "tab_state" if role == "tab" else (region or "page_action")
+            dedup_key = f"click:{url_key}:{label}:{href_lower}:{role}:{context}"
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            decisions.append(
+                ActionDecision(
+                    action_type=action_type,
+                    target_id=self.state.current_target_id,
+                    label=label,
+                    reason="visible interactive element discovered",
+                    dedup_key=dedup_key,
+                    metadata={
+                        "selector": selector,
+                        "index": int(spec.get("index", 0)),
+                        "context": context,
+                        "region": region,
+                        "role": role,
+                        "tag": str(spec.get("tag", "") or ""),
+                        "href": href,
+                        "has_popup": bool(spec.get("hasPopup")),
+                    },
+                )
+            )
+
+        return decisions
+
+    async def _rank_page_action_candidates(
+        self,
+        current_url: str,
+        dom_summary: DOMSummary,
+        vision_result: VisionResult,
+        decisions: list[ActionDecision],
+    ) -> list[ActionDecision]:
+        """Use the model to rank visible page-action candidates."""
+        if not decisions:
+            return []
+
+        page_type = vision_result.page_type
+        if page_type == "unknown":
+            page_type = self._infer_dom_page_type(current_url, dom_summary)
+
+        candidates = [
+            {
+                "index": index,
+                "label": decision.label,
+                "action_type": decision.action_type.value,
+                "context": str(decision.metadata.get("context", "")),
+                "region": str(decision.metadata.get("region", "")),
+                "role": str(decision.metadata.get("role", "")),
+                "tag": str(decision.metadata.get("tag", "")),
+                "href": str(decision.metadata.get("href", "")),
+            }
+            for index, decision in enumerate(decisions)
+        ]
+        ranking = await self.vision.rank_candidates(
+            kind="page_action",
+            goal=self.config.task.goal,
+            url=current_url,
+            page_type=page_type,
+            dom_summary=dom_summary,
+            interaction_hints=vision_result.interaction_hints,
+            candidates=candidates,
+        )
+        return self._apply_model_ranking_to_decisions(decisions, ranking.notes, ranking.choices)
 
     async def _plan_form_action(self, current_url: str) -> ActionDecision | None:
         """Plan a generic form-fill action for login/signup/onboarding flows."""
@@ -1467,20 +1415,6 @@ class ExplorationEngine:
             return self.config.task.profile_name
         return None
 
-    def _looks_like_auth_surface(self, current_url: str) -> bool:
-        lowered = current_url.lower()
-        return any(term in lowered for term in [
-            "/login",
-            "/signin",
-            "/sign-in",
-            "/signup",
-            "/sign-up",
-            "/register",
-            "/auth",
-            "/verify",
-            "/join",
-        ])
-
     async def _reobserve_current_state(
         self,
         state_id: str,
@@ -1518,14 +1452,16 @@ class ExplorationEngine:
             candidates, _ = await self.extractor.extract_all(
                 self.controller.page, self.state.current_target_id, current_depth
             )
-            route_candidates = self._rerank_route_candidates(
-                [c for c in candidates if c.target_type == TargetType.ROUTE],
+            route_candidates = await self._rerank_route_candidates(
+                current_url,
+                dom_summary,
                 vision_result,
+                [c for c in candidates if c.target_type == TargetType.ROUTE],
             )
             self.state.add_targets(route_candidates)
 
         planned = (
-            await self._plan_page_actions(current_url)
+            await self._plan_page_actions(current_url, dom_summary, vision_result)
             if self.config.run.enable_page_action_planning else []
         )
         self.state.add_decisions(planned)
@@ -1538,74 +1474,43 @@ class ExplorationEngine:
             f"reason={reason}, page_type={insight.page_type_vision or insight.page_type_dom}",
         )
 
-    def _rerank_route_candidates(self, route_candidates: list[ExplorationTarget],
-                                 vision_result: VisionResult) -> list[ExplorationTarget]:
-        """Rerank route candidates using page-type hints without changing executability."""
-        page_type = vision_result.page_type
+    async def _rerank_route_candidates(
+        self,
+        current_url: str,
+        dom_summary: DOMSummary,
+        vision_result: VisionResult,
+        route_candidates: list[ExplorationTarget],
+    ) -> list[ExplorationTarget]:
+        """Rerank route candidates with model-led next-step selection."""
         if not route_candidates:
             return route_candidates
 
-        public_only_mode = (
-            not self.config.task.allow_login_flows
-            and not self.config.task.allow_registration_flows
+        page_type = vision_result.page_type
+        if page_type == "unknown":
+            page_type = self._infer_dom_page_type(current_url, dom_summary)
+
+        candidates = [
+            {
+                "index": index,
+                "label": candidate.label,
+                "locator": candidate.locator,
+                "depth": candidate.depth,
+                "region": str(candidate.metadata.get("region", "")),
+                "context": str(candidate.metadata.get("context", "")),
+                "discovery_method": candidate.discovery_method,
+            }
+            for index, candidate in enumerate(route_candidates)
+        ]
+        ranking = await self.vision.rank_candidates(
+            kind="route",
+            goal=self.config.task.goal,
+            url=current_url,
+            page_type=page_type,
+            dom_summary=dom_summary,
+            interaction_hints=vision_result.interaction_hints,
+            candidates=candidates,
         )
-
-        def score(candidate: ExplorationTarget) -> tuple[int, int, str]:
-            label = candidate.label.lower()
-            locator = candidate.locator.lower()
-            score_value = int(candidate.metadata.get("priority", 0))
-
-            if candidate.discovery_method == "internal_link":
-                score_value += 1
-            if str(candidate.metadata.get("region", "")) == "main":
-                score_value += 1
-
-            if page_type == "dashboard":
-                if any(term in label for term in ["list", "manage", "workspace", "setting", "config", "user"]):
-                    score_value += 3
-            elif page_type == "landing":
-                if any(term in label for term in [
-                    "about", "docs", "download", "community", "learn", "get started",
-                    "benchmarks", "models", "evaluation", "leaderboard", "methodology",
-                ]):
-                    score_value += 3
-            elif page_type == "docs":
-                if any(term in label for term in ["docs", "tutorial", "guide", "reference", "download", "about"]):
-                    score_value += 3
-            elif page_type == "content":
-                if any(term in label for term in [
-                    "about", "community", "blog", "events", "jobs", "news",
-                    "analysis", "methodology", "article", "report",
-                ]):
-                    score_value += 2
-            elif page_type == "list":
-                if any(term in label for term in ["detail", "view", "record", "item"]):
-                    score_value += 2
-                if any(term in label for term in ["report", "analytics", "dashboard"]):
-                    score_value -= 1
-            elif page_type == "detail":
-                if any(term in label for term in ["detail", "view", "profile", "record"]):
-                    score_value += 2
-            elif page_type in {"form", "modal"}:
-                if any(term in label for term in ["create", "new", "edit", "config", "setting"]):
-                    score_value += 2
-
-            if public_only_mode:
-                if any(term in label or term in locator for term in self.config.exploration.auth_risk_path_hints):
-                    score_value -= 8
-                if any(term in label or term in locator for term in self.config.exploration.interactive_risk_path_hints):
-                    score_value -= 7
-
-            for term in self._goal_terms():
-                if term in label or term in locator:
-                    score_value += 3
-
-            score_value += int(self._site_memory["label_success"].get(label, 0))
-            score_value -= int(self._site_memory["label_failure"].get(label, 0))
-
-            return (-score_value, candidate.depth, candidate.label)
-
-        return sorted(route_candidates, key=score)
+        return self._apply_model_ranking_to_routes(route_candidates, ranking.notes, ranking.choices)
 
     def _build_page_insight(self, current_url: str, dom_summary: DOMSummary,
                             vision_result: VisionResult, state_id: str | None = None) -> PageInsight:
@@ -1636,6 +1541,99 @@ class ExplorationEngine:
             self._vision_results[insight.state_id] = vision_result.model_dump()
             self.artifacts.save_vision(insight.state_id, vision_result.model_dump())
 
+    def _current_page_insight(self) -> dict[str, object] | None:
+        current_state = self.state.states.get(self.state.current_state_id or "")
+        if current_state:
+            insight = self._page_insights.get(current_state.id)
+            if insight:
+                return insight
+            return self._latest_page_insight_for_url(current_state.url)
+
+        current_target = self.state.targets.get(self.state.current_target_id or "")
+        if current_target and current_target.locator.startswith(("http://", "https://")):
+            return self._latest_page_insight_for_url(current_target.locator)
+        return None
+
+    def _latest_page_insight_for_url(self, url: str) -> dict[str, object] | None:
+        normalized = self._normalize_url(url)
+        for insight in reversed(list(self._page_insights.values())):
+            insight_url = self._normalize_url(str(insight.get("url", "")))
+            if insight_url == normalized:
+                return insight
+        return None
+
+    def _apply_model_ranking_to_routes(
+        self,
+        route_candidates: list[ExplorationTarget],
+        notes: str,
+        choices: list[object],
+    ) -> list[ExplorationTarget]:
+        """Attach model scores to route candidates and return them sorted."""
+        ranked_indexes: set[int] = set()
+        total = len(route_candidates)
+
+        for rank, choice in enumerate(choices):
+            index = int(getattr(choice, "index", -1))
+            if index < 0 or index >= total or index in ranked_indexes:
+                continue
+            ranked_indexes.add(index)
+            candidate = route_candidates[index]
+            candidate.metadata["model_signal"] = max(total - rank, 1)
+            candidate.metadata["model_rank"] = rank + 1
+            candidate.metadata["model_reason"] = str(getattr(choice, "reason", "") or "")
+            if notes:
+                candidate.metadata["model_notes"] = notes
+
+        for index, candidate in enumerate(route_candidates):
+            if index in ranked_indexes:
+                continue
+            candidate.metadata.setdefault("model_signal", 0)
+            if notes:
+                candidate.metadata.setdefault("model_notes", notes)
+
+        return sorted(route_candidates, key=lambda item: (-self._score_route_target(item), item.depth, item.label.lower()))
+
+    def _apply_model_ranking_to_decisions(
+        self,
+        decisions: list[ActionDecision],
+        notes: str,
+        choices: list[object],
+    ) -> list[ActionDecision]:
+        """Attach model scores to page-action candidates and return the top items."""
+        ranked_indexes: set[int] = set()
+        total = len(decisions)
+
+        for rank, choice in enumerate(choices):
+            index = int(getattr(choice, "index", -1))
+            if index < 0 or index >= total or index in ranked_indexes:
+                continue
+            ranked_indexes.add(index)
+            decision = decisions[index]
+            decision.metadata["model_signal"] = max(total - rank, 1)
+            decision.metadata["model_rank"] = rank + 1
+            decision.metadata["model_reason"] = str(getattr(choice, "reason", "") or "")
+            if notes:
+                decision.metadata["model_notes"] = notes
+
+        for index, decision in enumerate(decisions):
+            if index in ranked_indexes:
+                continue
+            decision.metadata.setdefault("model_signal", 0)
+            if notes:
+                decision.metadata.setdefault("model_notes", notes)
+
+        ordered = sorted(decisions, key=lambda item: (-self._score_decision(item), item.label.lower()))
+        return ordered[:6]
+
+    def _score_route_target(
+        self,
+        candidate: ExplorationTarget,
+        *,
+        page_type: str | None = None,
+        interaction_hints: list[dict] | list | None = None,
+    ) -> int:
+        return int(candidate.metadata.get("model_signal", 0))
+
     def _select_best_pending_decision(self) -> ActionDecision | None:
         """Select the strongest pending decision using goal and memory signals."""
         if not self.state.pending_decisions:
@@ -1655,66 +1653,8 @@ class ExplorationEngine:
         return best_decision
 
     def _score_decision(self, decision: ActionDecision) -> int:
-        """Score a decision using goal-driven and memory-driven heuristics."""
-        score = 0
-        text = " ".join([
-            decision.label,
-            decision.reason,
-            str(decision.metadata.get("context", "")),
-        ]).lower()
-        selector = str(decision.metadata.get("selector", "")).strip()
-
-        for term in self._goal_terms():
-            if term in text:
-                score += 6
-
-        if decision.action_type == ActionType.FILL_AND_SUBMIT_FORM:
-            score += 5
-        elif decision.action_type == ActionType.CLICK_ACTION:
-            score += 3
-        elif decision.action_type == ActionType.OPEN_MODAL:
-            score += 2
-
-        if any(term in text for term in ["sign up", "register", "get started", "continue", "next"]):
-            score += 3
-        if any(term in text for term in ["login", "sign in"]):
-            score += 2
-
-        score += int(self._site_memory["selector_success"].get(selector, 0)) * 2
-        score -= int(self._site_memory["selector_failure"].get(selector, 0))
-        score += int(self._site_memory["label_success"].get(decision.label.lower(), 0))
-        score -= int(self._site_memory["label_failure"].get(decision.label.lower(), 0))
-        score += int(self._site_memory["action_type_success"].get(decision.action_type.value, 0))
-        score -= int(self._site_memory["action_type_failure"].get(decision.action_type.value, 0))
-        return score
-
-    def _goal_terms(self) -> list[str]:
-        """Build a compact list of goal terms for decision prioritization."""
-        terms: list[str] = []
-        explicit = [term.strip().lower() for term in self.config.task.goal_keywords if term.strip()]
-        terms.extend(explicit)
-        tokens = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_-]{2,}", self.config.task.goal.lower())
-        for token in tokens:
-            if token not in {"the", "and", "with", "that", "into", "from", "then", "after"}:
-                terms.append(token)
-        seen: set[str] = set()
-        unique_terms: list[str] = []
-        for term in terms:
-            if term not in seen:
-                seen.add(term)
-                unique_terms.append(term)
-        return unique_terms[:12]
-
-    def _canonicalize_policy_term(self, term: str) -> str:
-        """Normalize route-policy terms so common auth phrases match reliably."""
-        compact = re.sub(r"[^a-z0-9]+", "", term.lower())
-        if compact in {"login", "logon", "signin", "signon"}:
-            return "login"
-        if compact in {"signup", "register", "createaccount", "join"}:
-            return "signup"
-        if compact in {"auth", "oauth", "account"}:
-            return "auth"
-        return compact
+        """Score a decision using only model-provided ranking signals."""
+        return int(decision.metadata.get("model_signal", 0))
 
     async def _capture_runtime_signature(self) -> dict[str, str | bool]:
         """Capture a lightweight runtime signature for action validation."""
@@ -1819,45 +1759,22 @@ class ExplorationEngine:
         return component_name in analysis.get("component_types", [])
 
     def _infer_dom_page_type(self, current_url: str, summary: DOMSummary) -> str:
-        """Infer a coarse page type from DOM summary only."""
+        """Infer a coarse page type from structural DOM signals only."""
         components = set(summary.component_types)
-        url_lower = current_url.lower()
-        title_lower = summary.title.lower()
-        nav_text = " ".join(summary.nav_labels).lower()
-        button_text = " ".join(summary.button_labels).lower()
-        tab_text = " ".join(summary.tab_labels).lower()
-        combined_text = " ".join([title_lower, nav_text, button_text, tab_text, url_lower])
 
         if summary.has_modal:
             return "modal"
-        parsed = urlparse(current_url)
-        normalized_root = f"{parsed.scheme}://{parsed.netloc}"
-        if current_url.rstrip("/") == normalized_root.rstrip("/"):
-            if not summary.has_form and not summary.has_pagination:
-                return "landing"
-            if "table" not in components:
-                return "landing"
-        if any(term in combined_text for term in [
-            "docs", "documentation", "tutorial", "reference", "guide", "devguide",
-        ]) and ("sidebar" in components or "navbar" in components or summary.nav_labels):
-            return "docs"
-        if any(term in combined_text for term in [
-            "community", "about", "events", "jobs", "blog", "news",
-        ]) and not summary.has_pagination:
-            return "content"
-        if summary.has_form and any(term in combined_text for term in [
-            "login", "log in", "sign in", "sign up", "register", "create account", "join",
-        ]):
-            return "auth"
         if "table" in components and (summary.table_headers or summary.has_pagination):
             return "list"
         if "form" in components:
             return "form"
+        if summary.has_pagination:
+            return "list"
         if "tabs" in components and "table" not in components:
             return "detail"
-        if "card" in components and "table" not in components and "form" not in components:
+        if "card" in components and "table" not in components and "form" not in components and summary.nav_labels:
             return "dashboard"
-        if summary.nav_labels or summary.button_labels:
+        if summary.nav_labels or summary.button_labels or summary.title:
             return "content"
         return "unknown"
 

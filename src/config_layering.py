@@ -173,20 +173,8 @@ def _apply_selector_preset(config: "AppConfig") -> None:
 
 
 def _apply_heuristic_preset(config: "AppConfig") -> None:
-    preset = (config.layering.heuristic_preset or "competitive_analysis").strip().lower()
-    if preset in {"", "general"}:
-        return
-    if preset == "competitive_analysis":
-        config.exploration.high_value_path_hints = _extend_unique(
-            config.exploration.high_value_path_hints,
-            COMPETITIVE_HIGH_VALUE_PATH_HINTS,
-        )
-        config.exploration.interactive_risk_path_hints = _extend_unique(
-            config.exploration.interactive_risk_path_hints,
-            ["arena", "playground", "studio", "chat", "generate", "prompt", "try"],
-        )
-        return
-    raise SystemExit(f"Unsupported heuristic preset: {config.layering.heuristic_preset}")
+    """Heuristic presets are disabled; runtime prioritization is model-led."""
+    return
 
 
 def _resolve_site_pattern_path(config: "AppConfig", project_root: Path) -> Path | None:

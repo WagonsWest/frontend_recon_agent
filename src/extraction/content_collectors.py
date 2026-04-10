@@ -40,61 +40,10 @@ class ContentCollectors:
         "reddit.com",
     )
 
-    AUTH_LABEL_FRAGMENTS = (
-        "sign in",
-        "sign up",
-        "register",
-        "log in",
-        "login",
-        "create account",
-    )
-
-    CTA_HINT_FRAGMENTS = (
-        "start",
-        "get started",
-        "join",
-        "learn",
-        "try",
-        "explore",
-        "read",
-        "download",
-        "contact",
-        "book",
-        "apply",
-        "request",
-        "subscribe",
-    )
-
-    PROMINENT_CLASS_HINTS = (
-        "button",
-        "btn",
-        "cta",
-        "primary",
-        "action",
-        "submit",
-        "callout",
-    )
-
-    SECTION_CONTAINER_HINTS = (
-        "section",
-        "feature",
-        "content",
-        "article",
-        "card",
-        "panel",
-        "module",
-        "block",
-        "group",
-        "grid",
-        "columns",
-        "tile",
-        "callout",
-        "topic",
-        "overview",
-        "intro",
-        "guide",
-        "resource",
-    )
+    AUTH_LABEL_FRAGMENTS: tuple[str, ...] = ()
+    CTA_HINT_FRAGMENTS: tuple[str, ...] = ()
+    PROMINENT_CLASS_HINTS: tuple[str, ...] = ()
+    SECTION_CONTAINER_HINTS: tuple[str, ...] = ()
 
     def collect(self, soup: BeautifulSoup, url: str, page_type: str, screenshot_ref: str = "") -> list[EvidenceUnit]:
         units: list[EvidenceUnit] = []
@@ -105,19 +54,7 @@ class ContentCollectors:
         return units
 
     def _is_low_value_nav_label(self, label: str) -> bool:
-        normalized = " ".join(label.lower().split())
-        if normalized in {
-            "skip to content",
-            "close",
-            "menu",
-            "smaller",
-            "larger",
-            "back to top",
-        }:
-            return True
-        if normalized.replace(" ", "") in {"aa", "aaa"}:
-            return True
-        return False
+        return not " ".join(label.lower().split())
 
     def _is_low_value_nav_href(self, href: str) -> bool:
         normalized = href.strip().lower()
@@ -137,11 +74,7 @@ class ContentCollectors:
         return any(domain in normalized_href for domain in self.SOCIAL_DOMAINS)
 
     def _is_auth_nav_candidate(self, label: str, href: str) -> bool:
-        normalized_label = " ".join(label.lower().split())
-        normalized_href = href.strip().lower()
-        if any(fragment in normalized_label for fragment in self.AUTH_LABEL_FRAGMENTS):
-            return True
-        return any(fragment in normalized_href for fragment in ("/login", "/signin", "/signup", "/register"))
+        return False
 
     def _node_hint_text(self, node: Tag) -> str:
         parts: list[str] = [node.name]
@@ -172,8 +105,6 @@ class ContentCollectors:
 
     def _cta_score(self, node: Tag, label: str, href: str, selector: str) -> float:
         normalized_label = " ".join(label.lower().split())
-        node_hints = self._node_hint_text(node)
-        ancestor_hints = self._ancestor_hint_text(node)
         score = 0.0
 
         if node.name == "button":
@@ -182,20 +113,12 @@ class ContentCollectors:
             score += 1.5
         elif selector.startswith("header"):
             score += 0.5
-        if self._has_hint(node_hints, self.PROMINENT_CLASS_HINTS):
-            score += 2.0
         if href and not self._is_low_value_nav_href(href):
             score += 0.5
         if 1 <= len(normalized_label.split()) <= 6:
             score += 0.8
         if len(normalized_label) <= 48:
             score += 0.5
-        if any(fragment in normalized_label for fragment in self.CTA_HINT_FRAGMENTS):
-            score += 1.2
-        if self._is_auth_nav_candidate(label, href):
-            score += 1.0
-        if "nav" in ancestor_hints and not self._has_hint(node_hints, self.PROMINENT_CLASS_HINTS):
-            score -= 0.6
         return score
 
     def _collect_hero_units(self, soup: BeautifulSoup, url: str, page_type: str, screenshot_ref: str) -> list[EvidenceUnit]:

@@ -1,10 +1,9 @@
-"""Batch orchestration for concurrent multi-site runs."""
+"""Batch orchestration for concurrent multi-site UX runs."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import shutil
 from datetime import datetime
@@ -15,14 +14,13 @@ from urllib.parse import urlparse
 from rich.console import Console
 
 from src.agent.engine import ExplorationEngine
-from src.analysis.comparison_report import ComparisonReportGenerator
 from src.config import AppConfig, apply_run_profile, load_batch_config, load_config, load_config_for_url
 
 console = Console()
 
 
 class BatchRunner:
-    """Run multiple site configs concurrently and generate a comparison report."""
+    """Run multiple site configs concurrently and aggregate UX report outputs."""
 
     def __init__(self, project_root: Path | None = None):
         self.project_root = project_root or Path(__file__).parent.parent.parent
@@ -245,18 +243,16 @@ class BatchRunner:
 
         artifacts_root = self.project_root / config.output.artifacts_dir
         reports_root = self.project_root / config.output.reports_dir
-        analysis_path = artifacts_root / "competitive_analysis.json"
-        report_path = reports_root / config.synthesis.readable_report_filename_md
+        report_path = reports_root / config.synthesis.ux_report_filename_md
 
-        if not analysis_path.exists():
-            raise RuntimeError(f"{site_name}: missing competitive_analysis.json")
+        if not report_path.exists():
+            raise RuntimeError(f"{site_name}: missing {config.synthesis.ux_report_filename_md}")
 
-        analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
         return {
             "name": site_name,
             "slug": site_slug,
-            "analysis": analysis,
-            "readable_report_path": str(report_path),
+            "ux_report_path": str(report_path),
+            "artifacts_path": str(artifacts_root),
         }
 
     def _finalize_batch_results(
@@ -275,26 +271,21 @@ class BatchRunner:
                 continue
             successes.append(result)
 
-        reports_dir = batch_root / "reports"
-        reports_dir.mkdir(parents=True, exist_ok=True)
-        comparison = self._build_comparison_payload(successes, reports_dir)
-        comparison_path = reports_dir / "comparison_report.md"
-        comparison_path.write_text(
-            ComparisonReportGenerator().generate_markdown(comparison),
-            encoding="utf-8",
-        )
-        (reports_dir / "comparison_report.json").write_text(
-            json.dumps(comparison, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-
         summary = {
             "batch_name": batch_name,
             "generated_at": datetime.now().isoformat(),
             "site_count": site_count,
             "successful_sites": len(successes),
             "failed_sites": failures,
-            "comparison_report": str(comparison_path),
+            "sites": [
+                {
+                    "name": item["name"],
+                    "slug": item["slug"],
+                    "ux_report_path": item["ux_report_path"],
+                    "artifacts_path": item["artifacts_path"],
+                }
+                for item in successes
+            ],
         }
         (batch_root / "batch_summary.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False),
@@ -322,36 +313,6 @@ class BatchRunner:
             config.budget.max_depth = int(max_depth)
         if headless:
             config.browser.headless = True
-
-    def _build_comparison_payload(
-        self,
-        successes: list[dict[str, Any]],
-        reports_dir: Path,
-    ) -> list[dict[str, Any]]:
-        payload: list[dict[str, Any]] = []
-        for item in successes:
-            analysis = item["analysis"]
-            summary = analysis.get("competitive_summary", {})
-            readable_report_path = Path(item["readable_report_path"])
-            payload.append({
-                "name": item["name"],
-                "target": analysis.get("target", "unknown"),
-                "product_category_guess": summary.get("product_category_guess", "unknown"),
-                "summary": {
-                    "application_surface_score": float(summary.get("application_surface_score", 0)),
-                    "data_density_score": float(summary.get("data_density_score", 0)),
-                    "workflow_complexity_score": float(summary.get("workflow_complexity_score", 0)),
-                },
-                "page_type_distribution": analysis.get("page_type_distribution", {}),
-                "modules": [module.get("name", "unknown") for module in analysis.get("feature_modules", [])],
-                "strengths": summary.get("observed_strengths", []),
-                "gaps": summary.get("observed_gaps", []),
-                "readable_report_path": self._relpath(readable_report_path, reports_dir),
-            })
-        return payload
-
-    def _relpath(self, path: Path, start: Path) -> str:
-        return os.path.relpath(path, start).replace("\\", "/")
 
     def _slug(self, value: str) -> str:
         slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", value.strip()).strip("_").lower()

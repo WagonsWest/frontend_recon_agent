@@ -22,7 +22,7 @@ task:
   use_vision_on_state_change: true
   max_reobservations_per_run: 10
   profile_name: "Test User"
-  profile_email: "zhiyuanzhang1997@gmail.com"
+  profile_email: "test@example.com"
   profile_password: ""
   profile_company: "Example Inc"
 
@@ -52,14 +52,6 @@ vision:
   api_key_env: "OPENAI_API_KEY"
   timeout_ms: 20000
 
-synthesis:
-  enabled: false
-  provider: "openai"
-  model: "gpt-5.4"
-  api_base_url: "https://api.openai.com/v1"
-  api_key_env: "OPENAI_API_KEY"
-  timeout_ms: 25000
-
 run:
   profile: "demo"
   enable_page_action_planning: true
@@ -67,7 +59,7 @@ run:
 
 layering:
   selector_preset: "general_web"
-  heuristic_preset: "competitive_analysis"
+  heuristic_preset: "none"
   site_patterns_enabled: true
 
 output:

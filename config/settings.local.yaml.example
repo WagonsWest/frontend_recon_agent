@@ -69,18 +69,13 @@ login:
 #   timeout_ms: 15000
 
 # synthesis:
-#   enabled: true                  # Optional LLM synthesis for final competitive report
-#   provider: "openai"
-#   model: "gpt-5.4"
-#   api_base_url: "https://api.openai.com/v1"
-#   api_key_env: "OPENAI_API_KEY"
-#   timeout_ms: 20000
+#   ux_report_filename_md: "ux_report.md"
 # 
 # run:
 #   profile: "demo"                # default | smoke_fast | demo | full
 
 # layering:
 #   selector_preset: "general_web"         # general_web | admin_ui | hybrid_admin
-#   heuristic_preset: "competitive_analysis"  # general | competitive_analysis
+#   heuristic_preset: "none"
 #   site_patterns_enabled: true
 #   # site_pattern is configured under target, e.g. target.site_pattern: "config/site_patterns/example.com.yaml"

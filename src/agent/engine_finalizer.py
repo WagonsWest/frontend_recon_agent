@@ -10,7 +10,12 @@ from rich.console import Console
 from rich.panel import Panel
 
 from src.agent.state import AgentPhase
-from src.analysis.readable_report import ReadableCompetitiveReportGenerator
+from src.analysis.runtime_artifacts import (
+    build_operation_trace,
+    build_site_hierarchy,
+    render_operation_trace_markdown,
+    render_site_hierarchy_markdown,
+)
 from src.analysis.ux_report import UserExperienceReportGenerator
 from src.artifacts.inventory import InventoryGenerator
 from src.artifacts.report import ReportGenerator
@@ -31,6 +36,7 @@ class FinalizationRuntime:
     async def phase_finalize(self) -> None:
         self.engine.state.phase = AgentPhase.FINALIZE
         end_time = datetime.now().isoformat()
+        run_log_entries = self.engine.logger.rows()
 
         console.print("\n[bold]Generating artifacts...[/bold]")
 
@@ -53,6 +59,24 @@ class FinalizationRuntime:
         with self.engine.logger.timed(AgentPhase.FINALIZE, "generate_site_memory") as ctx:
             path = self.engine.artifacts.save_json("site_memory.json", self.engine._site_memory)
             ctx["reason"] = f"site memory -> {path.name}"
+
+        with self.engine.logger.timed(AgentPhase.FINALIZE, "generate_operation_trace") as ctx:
+            operation_trace = build_operation_trace(run_log_entries)
+            json_path = self.engine.artifacts.save_json("operation_trace.json", operation_trace)
+            md_path = self.engine.artifacts.save_text(
+                "operation_trace.md",
+                render_operation_trace_markdown(operation_trace),
+            )
+            ctx["reason"] = f"{operation_trace['stats']['total_steps']} steps -> {json_path.name}, {md_path.name}"
+
+        with self.engine.logger.timed(AgentPhase.FINALIZE, "generate_site_hierarchy") as ctx:
+            site_hierarchy = build_site_hierarchy(self.engine.state)
+            json_path = self.engine.artifacts.save_json("site_hierarchy.json", site_hierarchy)
+            md_path = self.engine.artifacts.save_text(
+                "site_hierarchy.md",
+                render_site_hierarchy_markdown(site_hierarchy),
+            )
+            ctx["reason"] = f"{site_hierarchy['stats']['visited_nodes']} visited nodes -> {json_path.name}, {md_path.name}"
 
         with self.engine.logger.timed(AgentPhase.FINALIZE, "generate_extraction_artifacts") as ctx:
             extraction_rows = list(self.engine._extraction_results.values())
@@ -81,66 +105,22 @@ class FinalizationRuntime:
             path = self.engine.artifacts.save_text("exploration_report.md", report)
             ctx["reason"] = f"report -> {path.name}"
 
-        with self.engine.logger.timed(AgentPhase.FINALIZE, "generate_competitive_analysis") as ctx:
-            competitive = self.engine.competitive.generate(
-                self.engine.state,
-                self.engine._analysis_results,
-                self.engine._page_insights,
-                self.engine._extraction_results,
-            )
-            self.engine.artifacts.save_json("competitive_analysis.json", competitive.model_dump())
-            structured_markdown = self.engine.competitive.generate_markdown(competitive)
-            self.engine.artifacts.save_text(
-                self.engine.config.synthesis.structured_report_filename_md,
-                structured_markdown,
-            )
-            readable_markdown = ReadableCompetitiveReportGenerator().generate(
-                self.engine.state,
-                competitive,
-                self.engine._page_insights,
-                self.engine._extraction_results,
-                self.engine.artifacts.reports_dir(),
-            )
-            self.engine.artifacts.save_text(
-                self.engine.config.synthesis.readable_report_filename_md,
-                readable_markdown,
-            )
+        with self.engine.logger.timed(AgentPhase.FINALIZE, "generate_ux_report") as ctx:
             ux_markdown = UserExperienceReportGenerator().generate(
                 self.engine.state,
-                competitive,
                 self.engine._page_insights,
                 self.engine._extraction_results,
                 self.engine.artifacts.reports_dir(),
+                run_log_entries=run_log_entries,
+                coverage_data=coverage_data,
+                operation_trace=operation_trace,
+                site_hierarchy=site_hierarchy,
             )
-            self.engine.artifacts.save_text(
+            path = self.engine.artifacts.save_text(
                 self.engine.config.synthesis.ux_report_filename_md,
                 ux_markdown,
             )
-
-            synthesized = await self.engine.synthesis.synthesize(
-                competitive.model_dump(),
-                self.engine._page_insights,
-                self.engine._extraction_results,
-            )
-            if self.engine.config.synthesis.enabled:
-                self.engine.artifacts.save_json(
-                    self.engine.config.synthesis.artifact_filename_json,
-                    synthesized.model_dump(),
-                )
-            if self.engine.config.synthesis.enabled and synthesized.markdown_report:
-                self.engine.artifacts.save_text(
-                    self.engine.config.synthesis.artifact_filename_md,
-                    synthesized.markdown_report,
-                )
-            else:
-                self.engine.artifacts.save_text(
-                    self.engine.config.synthesis.artifact_filename_md,
-                    structured_markdown,
-                )
-            ctx["reason"] = (
-                f"category={competitive.competitive_summary.product_category_guess}, "
-                f"modules={len(competitive.feature_modules)}"
-            )
+            ctx["reason"] = f"ux report -> {path.name}"
 
         if self.engine.config.run.enable_timing_summary:
             timing_path = self.engine.artifacts.save_json("run_timing_summary.json", self.engine.logger.summary())
@@ -164,26 +144,29 @@ class FinalizationRuntime:
             )
 
         stats = self.engine.state.get_stats()
-        console.print(Panel.fit(
-            f"[bold green]Exploration Complete[/bold green]\n\n"
-            f"States captured: {stats['states_captured']}\n"
-            f"Targets discovered: {stats['total_targets']}\n"
-            f"Visited: {stats['visited']} | Skipped: {stats['skipped']} | Failed: {stats['failed']}\n"
-            f"Budget used: {stats['budget_used']} / {self.engine.state.budget_total}\n"
-            f"Steps: {stats['steps']}\n\n"
-            f"Artifacts:\n"
-            f"  inventory.json, sitemap.json, run_log.jsonl\n"
-            f"  run_timing_summary.json\n"
-            f"  run_observe_breakdown.json\n"
-            f"  exploration_report.md\n"
-            f"  {self.engine.config.synthesis.readable_report_filename_md}\n"
-            f"  {self.engine.config.synthesis.ux_report_filename_md}\n"
-            f"  {len(self.engine._analysis_results)} state analyses\n"
-            f"  {len(self.engine._page_insights)} page insights\n"
-            f"  {len(self.engine._extraction_results)} extraction results\n"
-            f"  competitive_analysis.json / .md",
-            title="Summary",
-        ))
+        console.print(
+            Panel.fit(
+                f"[bold green]Exploration Complete[/bold green]\n\n"
+                f"States captured: {stats['states_captured']}\n"
+                f"Targets discovered: {stats['total_targets']}\n"
+                f"Visited: {stats['visited']} | Skipped: {stats['skipped']} | Failed: {stats['failed']}\n"
+                f"Budget used: {stats['budget_used']} / {self.engine.state.budget_total}\n"
+                f"Steps: {stats['steps']}\n\n"
+                f"Artifacts:\n"
+                f"  inventory.json, sitemap.json, site_hierarchy.json\n"
+                f"  operation_trace.json, run_log.jsonl\n"
+                f"  run_timing_summary.json\n"
+                f"  run_observe_breakdown.json\n"
+                f"  exploration_report.md\n"
+                f"  operation_trace.md\n"
+                f"  site_hierarchy.md\n"
+                f"  {self.engine.config.synthesis.ux_report_filename_md}\n"
+                f"  {len(self.engine._analysis_results)} state analyses\n"
+                f"  {len(self.engine._page_insights)} page insights\n"
+                f"  {len(self.engine._extraction_results)} extraction results",
+                title="Summary",
+            )
+        )
 
     def observe_breakdown_summary(self) -> dict[str, object]:
         entries = list(self.engine._observe_breakdown_entries)

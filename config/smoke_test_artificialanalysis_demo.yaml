@@ -49,14 +49,6 @@ vision:
   api_key_env: "OPENAI_API_KEY"
   timeout_ms: 20000
 
-synthesis:
-  enabled: false
-  provider: "openai"
-  model: "gpt-5.4"
-  api_base_url: "https://api.openai.com/v1"
-  api_key_env: "OPENAI_API_KEY"
-  timeout_ms: 25000
-
 run:
   profile: "demo"
   enable_page_action_planning: false
@@ -64,5 +56,5 @@ run:
 
 layering:
   selector_preset: "general_web"
-  heuristic_preset: "competitive_analysis"
+  heuristic_preset: "none"
   site_patterns_enabled: true

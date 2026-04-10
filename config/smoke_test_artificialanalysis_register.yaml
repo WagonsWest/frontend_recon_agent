@@ -19,7 +19,7 @@ task:
   use_vision_on_state_change: true
   max_reobservations_per_run: 8
   profile_name: "Test User"
-  profile_email: "zhiyuanzhang1997@gmail.com"
+  profile_email: "test@example.com"
   profile_password: "TestPassword123!"
   profile_company: "Example Inc"
 
@@ -47,13 +47,10 @@ browser:
 vision:
   enabled: false
 
-synthesis:
-  enabled: false
-
 run:
   profile: "demo"
 
 layering:
   selector_preset: "general_web"
-  heuristic_preset: "competitive_analysis"
+  heuristic_preset: "none"
   site_patterns_enabled: true

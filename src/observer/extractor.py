@@ -23,18 +23,7 @@ class CandidateExtractor:
 
     def _is_low_value_nav_label(self, label: str) -> bool:
         normalized = " ".join(label.lower().split())
-        if normalized in {
-            "skip to content",
-            "close",
-            "menu",
-            "smaller",
-            "larger",
-            "back to top",
-        }:
-            return True
-        if normalized.replace(" ", "") in {"aa", "aaa"}:
-            return True
-        return False
+        return not normalized
 
     def _is_low_value_nav_href(self, href: str) -> bool:
         normalized = href.strip().lower()
@@ -69,33 +58,10 @@ class CandidateExtractor:
         segment = path.split("/")[-1].replace("-", " ").replace("_", " ").strip()
         return segment[:80] if segment else "Route"
 
-    def _matches_hint(self, label: str, href: str, hints: list[str]) -> bool:
-        label_lower = " ".join(label.lower().split())
-        href_lower = href.lower()
-        return any(hint in href_lower or hint in label_lower for hint in hints)
-
-    def _goal_hints(self) -> list[str]:
-        return [hint.lower().strip() for hint in self.config.task.goal_keywords if hint and hint.strip()]
-
-    def _public_only_mode(self) -> bool:
-        return not self.config.task.allow_login_flows and not self.config.task.allow_registration_flows
-
     def _normalize_label(self, label: str) -> str:
         return " ".join(label.split()).strip()
 
     def _route_defer_reason(self, label: str, href: str, region: str) -> str:
-        if self._public_only_mode():
-            if self._matches_hint(label, href, self.config.exploration.auth_risk_path_hints):
-                return "auth_risk"
-            if self._matches_hint(label, href, self.config.exploration.interactive_risk_path_hints):
-                return "interactive_risk"
-            if region == "nav":
-                content_signals = (
-                    self._matches_hint(label, href, self.config.exploration.high_value_path_hints)
-                    or self._matches_hint(label, href, self._goal_hints())
-                )
-                if not content_signals:
-                    return "global_nav"
         return ""
 
     def _nav_signature(self, targets: list[ExplorationTarget]) -> str:
@@ -131,8 +97,6 @@ class CandidateExtractor:
                 "href": normalized_href,
                 "region": region,
                 "context": context,
-                "defer_reason": self._route_defer_reason(normalized_label, normalized_href, region),
-                "priority": self._route_priority(normalized_label, normalized_href, region, context),
                 "original_selector": original_selector,
                 "hover_path": list(hover_path or []),
             },
@@ -217,7 +181,7 @@ class CandidateExtractor:
         except Exception:
             return routes
 
-        ranked: list[tuple[int, str, str, str, str]] = []
+        revealed: list[tuple[str, str, str, str]] = []
         for anchor in anchors:
             try:
                 if not bool(anchor.get("visible")):
@@ -240,14 +204,13 @@ class CandidateExtractor:
                 if href in seen_hrefs or label in seen_labels:
                     continue
 
-                ranked.append((self._route_priority(label, href, region, context), href, label, region, context))
+                revealed.append((href, label, region, context))
                 seen_hrefs.add(href)
                 seen_labels.add(label)
             except Exception:
                 continue
 
-        ranked.sort(key=lambda item: (-item[0], item[2].lower(), item[1]))
-        for priority, href, label, region, context in ranked[: self.config.exploration.max_route_candidates_per_page]:
+        for href, label, region, context in revealed[: self.config.exploration.max_route_candidates_per_page]:
             target = self._make_route_target(
                 page_url=page.url,
                 href=href,
@@ -260,7 +223,6 @@ class CandidateExtractor:
                 original_selector="hover_menu",
                 hover_path=hover_path,
             )
-            target.metadata["priority"] = priority + 2
             routes.append(target)
         return routes
 
@@ -328,42 +290,11 @@ class CandidateExtractor:
         return "|".join(parts[:12])
 
     def _route_priority(self, label: str, href: str, region: str, context: str) -> int:
-        """Heuristic score for prioritizing public route candidates."""
-        label_lower = " ".join(label.lower().split())
-        href_lower = href.lower()
-        score = 0
-
-        if region == "nav":
-            score += 1
-        elif region == "main":
-            score += 5
-        elif region == "footer":
-            score -= 3
-
-        if context in {"table", "card", "section"}:
-            score += 3
-
-        for hint in self.config.exploration.high_value_path_hints:
-            if hint in href_lower or hint in label_lower:
-                score += 4
-
-        if self._public_only_mode():
-            if self._matches_hint(label, href, self.config.exploration.auth_risk_path_hints):
-                score -= 9
-            if self._matches_hint(label, href, self.config.exploration.interactive_risk_path_hints):
-                score -= 10
-
-        for hint in self.config.exploration.low_value_path_hints:
-            if hint in href_lower or hint in label_lower:
-                score -= 4
-
-        if not self._public_only_mode() and any(token in href_lower for token in ["/login", "/signin", "/signup", "/register"]):
-            score += 1
-
-        return score
+        """Route priority is no longer heuristic-driven."""
+        return 0
 
     def _is_viable_route_candidate(self, page_url: str, label: str, href: str) -> bool:
-        """Filter out low-value or off-site routes before entering the frontier."""
+        """Keep only mechanically executable same-site routes."""
         href_lower = href.lower()
         label_lower = label.lower()
 
@@ -375,11 +306,7 @@ class CandidateExtractor:
             return False
         if self._is_low_value_nav_href(href):
             return False
-        if any(hint in href_lower for hint in self.config.exploration.low_value_path_hints):
-            return False
         if any(kw.lower() in label_lower for kw in self.config.exploration.destructive_keywords):
-            return False
-        if any(token in label_lower for token in ["logout", "sign out", "log out", "delete", "remove"]):
             return False
         return True
 
@@ -557,7 +484,7 @@ class CandidateExtractor:
         except Exception:
             return targets
 
-        ranked_candidates: list[tuple[int, str, str, str, str]] = []
+        ordered_candidates: list[tuple[str, str, str, str]] = []
         for anchor in anchors:
             try:
                 if not bool(anchor.get("visible")):
@@ -585,12 +512,11 @@ class CandidateExtractor:
 
                 seen_hrefs.add(href)
                 seen_labels.add(label)
-                ranked_candidates.append((self._route_priority(label, href, region, context), href, label, region, context))
+                ordered_candidates.append((href, label, region, context))
             except Exception:
                 continue
 
-        ranked_candidates.sort(key=lambda item: (-item[0], item[2].lower(), item[1]))
-        for priority, href, label, region, context in ranked_candidates[: self.config.exploration.max_route_candidates_per_page]:
+        for href, label, region, context in ordered_candidates[: self.config.exploration.max_route_candidates_per_page]:
             target = self._make_route_target(
                 page_url=page.url,
                 href=href,
@@ -602,7 +528,6 @@ class CandidateExtractor:
                 context=context,
                 original_selector="document.querySelectorAll('a[href]')",
             )
-            target.metadata["priority"] = priority
             targets.append(target)
 
         return targets

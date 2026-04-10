@@ -1,39 +1,40 @@
 target:
-  url: "https://arena.ai/leaderboard"
-  dashboard_url: ""
+  url: "https://ponder.ing/dashboard"
+  dashboard_url: "https://ponder.ing/dashboard"
 
 task:
-  goal: "Understand the site's main benchmark surfaces, leaderboard workflows, and public comparison entry points."
+  goal: "Understand the logged-in user experience, onboarding cues, workspace entry points, and primary knowledge workflow surfaces."
   goal_keywords:
-    - "leaderboard"
-    - "models"
-    - "code"
-    - "vision"
-    - "image"
-    - "arena"
-    - "benchmark"
+    - "workspace"
+    - "knowledge"
+    - "files"
+    - "question"
+    - "spaces"
+    - "research"
+    - "insights"
   allow_registration_flows: false
-  allow_login_flows: false
+  allow_login_flows: true
   captcha_policy: "pause_and_report"
   human_assistance_allowed: true
   use_site_memory: true
   validate_action_outcomes: true
   reobserve_on_state_change: true
   use_vision_on_state_change: true
-  max_reobservations_per_run: 10
+  max_reobservations_per_run: 20
   profile_name: "Test User"
   profile_email: "test@example.com"
-  profile_password: "TestPassword123!"
+  profile_password: ""
   profile_company: "Example Inc"
 
 login:
-  mode: "public"
+  mode: "login"
   username: ""
   password: ""
+  success_indicator: ""
 
 budget:
-  max_states: 10
-  max_depth: 2
+  max_states: 12
+  max_depth: 3
   retry_limit: 1
   novelty_threshold: 0.12
 
@@ -53,8 +54,8 @@ vision:
 
 run:
   profile: "demo"
-  enable_page_action_planning: false
-  enable_interaction_exploration: false
+  enable_page_action_planning: true
+  enable_interaction_exploration: true
 
 layering:
   selector_preset: "general_web"
@@ -62,7 +63,7 @@ layering:
   site_patterns_enabled: true
 
 output:
-  screenshots_dir: "output/lmarena_demo/screenshots"
-  dom_snapshots_dir: "output/lmarena_demo/dom_snapshots"
-  reports_dir: "output/lmarena_demo/reports"
-  artifacts_dir: "output/lmarena_demo/artifacts"
+  screenshots_dir: "output/ponder_ux_deep_demo/screenshots"
+  dom_snapshots_dir: "output/ponder_ux_deep_demo/dom_snapshots"
+  reports_dir: "output/ponder_ux_deep_demo/reports"
+  artifacts_dir: "output/ponder_ux_deep_demo/artifacts"

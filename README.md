@@ -1,282 +1,270 @@
-# Frontend Mimic Agent
+# Frontend Recon Agent
 
-A browser agent for autonomous website interaction, evidence capture, and structured analysis. The current codebase started from admin-dashboard exploration, but is now being refactored toward a more general agent loop that can handle registration-first and multi-step product flows.
+`frontend_recon_agent` is a Playwright-based website exploration agent for UX review.
 
-The current implementation already supports optional vision-assisted page understanding, structured extraction for list/detail/form pages, deterministic competitive-analysis artifacts, and an optional LLM synthesis layer for the final report.
-
-The browser runtime remains Playwright-based. The current refactor direction is not to replace Playwright, but to make the control layer more agentic: goal-driven, step-by-step, re-observing after state changes, and preserving site memory for later steps in the same run.
+It drives a real browser, captures evidence while exploring, and turns that evidence into a reviewer-style UX report instead of a bare action transcript.
 
 ## What It Does
 
-1. **Opens and navigates** a target website using Playwright
-2. **Captures evidence** — screenshots, DOM snapshots, logs, and state artifacts
-3. **Understands pages repeatedly** with DOM analysis and optional vision calls after important state changes
-4. **Extracts structured data** from list/detail/form-like surfaces
-5. **Produces structured outputs** that can support product teardown and competitive analysis
+- Explores public or logged-in product surfaces with a bounded state/depth budget
+- Preserves screenshots, DOM snapshots, run logs, inventory, coverage, and page insights
+- Uses model-assisted page understanding and next-step ranking
+- Keeps a full operation trace and explored site hierarchy
+- Generates a UX report grounded in the captured runtime artifacts
+- Supports pause-and-resume for manual login, verification, or anti-bot checkpoints
+- Supports batch runs that aggregate per-site UX reports
 
-## Architecture
+## Core Flow
 
+The runtime is organized around one browser loop:
+
+```text
+observe -> rank candidates -> act -> validate -> re-observe
 ```
-Reasoning Layer  (Claude/ChatGPT via conversation — reviews artifacts, generates code)
-       ↑ handoff
-Observation Layer (Python — candidate detection, fingerprinting, novelty scoring)
-       ↑ data
-Execution Layer   (Playwright — navigate, click, capture)
+
+The project also keeps a separate evidence pipeline:
+
+```text
+capture -> normalize -> persist -> summarize -> report
 ```
 
-The current runtime still uses a route-first exploration core, but is being shifted toward a more general:
-1. `observe`
-2. `decide`
-3. `act`
-4. `re-observe`
-5. `continue`
-loop suitable for broader browser-agent tasks.
+That split is deliberate. The browser agent is responsible for exploration. The reporting layer is responsible for turning captured evidence into a readable UX review.
 
-Recent agent-loop upgrades include:
-- goal-aware decision prioritization
-- action-outcome validation after clicks and form submits
-- lightweight site memory persisted as an artifact for the current domain
-- captcha / anti-bot detection as a first-class runtime state
+## Current Architecture
 
-## Quick Start
+```text
+src/
+  agent/        runtime loop, state machine, execution, finalization, batch runner
+  browser/      Playwright controller and auth/session handling
+  observer/     route discovery and candidate extraction
+  analyzer/     DOM analysis helpers
+  extraction/   structured page evidence extraction
+  vision/       page understanding and candidate ranking prompts/client/types
+  analysis/     runtime artifacts, UX memo synthesis, UX report rendering
+  artifacts/    inventory, sitemap, exploration report, artifact management
+  tools/        offline report regeneration
+```
+
+## Main Outputs
+
+After a run, outputs are written under the configured `output/` directories.
+
+Typical artifacts are:
+
+- `screenshots/`
+- `dom_snapshots/`
+- `artifacts/inventory.json`
+- `artifacts/sitemap.json`
+- `artifacts/coverage.json`
+- `artifacts/site_hierarchy.json`
+- `artifacts/operation_trace.json`
+- `artifacts/run_log.jsonl`
+- `artifacts/page_insights/`
+- `artifacts/dataset.jsonl`
+- `artifacts/dataset_summary.json`
+- `artifacts/extraction_failures.json`
+- `reports/exploration_report.md`
+- `reports/site_hierarchy.md`
+- `reports/operation_trace.md`
+- `reports/ux_report.md`
+
+For batch runs, each site gets an isolated output root under `output/batch/.../sites/<site>/`, and the batch root contains `batch_summary.json`.
+
+## Installation
+
+Requirements:
+
+- Python 3.11+
+- Chromium via Playwright
+- Optional `OPENAI_API_KEY` for model-assisted vision and candidate ranking
+
+Setup:
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
 playwright install chromium
+```
 
-# Configure
-cp config/settings.yaml config/settings.local.yaml
-# Edit settings.local.yaml with your target URL and credentials
+## Running The Agent
 
-# Run
-python -m src.cli
+### Single Config Run
 
-# Run a fast smoke profile
-python -m src.cli --config config/smoke_test_public_fast.yaml
+```bash
+python -m src.cli --config config/smoke_test_public.yaml --clear
+```
 
-# Or run a multi-site batch
+### Login-Gated UX Review
+
+```bash
+python -m src.cli --config config/smoke_test_ponder_ux.yaml --clear
+```
+
+If the product requires manual help during login or verification, keep the visible browser open and continue in the terminal when prompted.
+
+### Direct URL Mode
+
+You can pass one to three URLs directly:
+
+```bash
+python -m src.cli https://example.com https://example.org
+```
+
+You can also combine direct URLs with a base config:
+
+```bash
+python -m src.cli --config config/smoke_test_public.yaml --headless https://example.com
+```
+
+### Batch Runs
+
+```bash
 python -m src.cli --batch-config config/smoke_test_batch.yaml
 ```
 
-## CLI Options
+Batch mode writes per-site UX outputs and records their paths in `batch_summary.json`.
 
-```
-python -m src.cli [OPTIONS]
+## Config Model
 
-  --config, -c PATH      Path to config YAML file
-  --batch-config PATH    Path to batch YAML file
-  --profile TEXT         Run profile: default | smoke_fast | demo | full
-  --max-states, -s INT   Override max states budget
-  --max-depth, -d INT    Override max exploration depth
-  --headless             Deprecated for interactive auth flows; browser stays visible
-  --clear                Clear output before running
-```
+Configuration is loaded from:
 
-## Targeting a New Website
+1. `config/settings.local.yaml` if present
+2. `config/settings.yaml`
+3. the file passed via `--config`
+4. environment overrides
 
-1. Copy the template config:
-   ```bash
-   cp config/settings.yaml config/settings.local.yaml
-   ```
+Environment overrides:
 
-2. Edit `config/settings.local.yaml` with your target:
+- `MIMIC_USERNAME`
+- `MIMIC_PASSWORD`
 
-   ```yaml
-   # Required — your target site
-   target:
-     url: "https://your-site.com/login"          # Login page URL
-     dashboard_url: "https://your-site.com/home"  # Page after login (or leave empty)
+Important config sections:
 
-   # Required for existing-account login
-   login:
-     mode: "login"
-     username: "your_username"
-     password: "your_password"
-   ```
+- `target`
+  - `url`
+  - `dashboard_url`
+  - `site_pattern`
+- `task`
+  - goal, keywords, captcha policy, re-observation, human assistance
+- `login`
+  - mode, credentials, selector overrides, verification selectors
+- `budget`
+  - `max_states`
+  - `max_depth`
+  - `retry_limit`
+- `exploration`
+  - route candidate collection and hover-menu discovery
+- `interaction`
+  - button, modal, expand, and tab selectors
+- `browser`
+  - headless, viewport, slow motion
+- `vision`
+  - provider, model, timeout, artifact directories
+- `run`
+  - profile and runtime feature toggles
+- `output`
+  - screenshot, DOM, report, and artifact roots
 
-   Access mode options:
+## Login Modes
 
-   - `public`: no authentication, just enter the site
-   - `login`: use an existing account
-   - `register`: create an account with email-first registration selectors
-   - `auto`: prefer login if credentials exist, otherwise try registration when configured, otherwise continue as public
+Supported `login.mode` values:
 
-   For registration flows that pause on email verification:
+- `public`
+- `login`
+- `register`
+- `manual`
+- `auto`
 
-   - keep the browser visible
-   - when verification is detected, the run pauses in the terminal
-   - you can either type the code into the terminal so the agent fills it, or
-     complete the step manually in the browser and press Enter to continue
+Use `manual` when the site needs a real human-assisted login flow and you want the run to continue in the same browser session.
 
-   That's it for most Element Plus / Ant Design / Bootstrap admin sites. The defaults handle the rest.
+## CLI
 
-3. **If the site uses a custom UI framework**, also configure selectors:
+```text
+python -m src.cli [OPTIONS] [TARGET_URL ...]
 
-   ```yaml
-   # Optional — customize for non-standard UI frameworks
-   login:
-     username_selector: "input#my-username"    # CSS selector for username field
-     password_selector: "input#my-password"
-     submit_selector: "button#login-btn"
-
-   exploration:
-     nav_selectors:                            # How to find sidebar/nav menu items
-       - ".my-nav-item a[href]"
-       - ".sidebar-link"
-     submenu_expand_selectors:                 # How to expand collapsed sub-menus
-       - ".my-submenu:not(.open) > .toggle"
-
-   interaction:
-     action_button_selectors:                  # Action/operation buttons on table rows
-       - "button:has-text('Actions')"
-     modal_selectors:                          # How to detect open modals/dialogs
-       - ".my-modal:visible"
-     modal_close_selectors:                    # How to close modals
-       - ".my-modal .close-btn"
-   ```
-
-4. Run:
-   ```bash
-   python -m src.cli
-   ```
-
-## Configuration Reference
-
-Edit `config/settings.local.yaml`:
-
-| Section | Key Settings |
-|---------|-------------|
-| `target` | `url` (entry page), `dashboard_url` (optional post-login page) |
-| `task` | `goal`, registration/login flow allowance, captcha policy |
-| `login` | `username`, `password`, form element selectors |
-| `crawl` | `wait_after_navigation`, `wait_for_spa`, `interaction_timeout` |
-| `budget` | `max_states` (capture limit), `max_depth`, `retry_limit`, `novelty_threshold` |
-| `exploration` | `nav_selectors`, `submenu_expand_selectors`, `skip_patterns`, `destructive_keywords` |
-| `interaction` | Selectors for action buttons, modals, dropdowns, tabs, expand rows |
-| `browser` | `headless`, `viewport_width/height`, `slow_mo` |
-| `vision` | `enabled`, `provider`, `model`, `api_base_url`, `api_key_env`, `timeout_ms` |
-| `synthesis` | `enabled`, `provider`, `model`, `api_base_url`, `api_key_env`, `timeout_ms` |
-
-Important `task` settings:
-- `goal` – high-level objective for the agent
-- `goal_keywords` – optional extra terms that should bias action selection
-- `allow_registration_flows` – allow multi-step signup / onboarding flows
-- `captcha_policy` – how to behave when captcha or anti-bot is detected
-- `use_site_memory` – preserve and reuse per-domain action outcomes during a run
-- `validate_action_outcomes` – check whether a click or submit actually changed the state
-- `reobserve_on_state_change` – refresh page understanding after meaningful state changes
-- `use_vision_on_state_change` — allow vision on those repeated understanding passes
-
-Important `login` settings:
-- `mode` — one of `auto`, `public`, `login`, or `register`
-- `register_url` — optional explicit registration page
-- `register_link_selector` — optional selector that opens a signup flow from the entry page
-- `registration_*_selector` — optional selectors for name/email/password/company fields and submit button
-
-Important `run` settings:
-- `profile` — one of `default`, `smoke_fast`, `demo`, or `full`
-- `navigation_wait_until` — browser navigation strategy; `smoke_fast` uses `domcontentloaded`
-- `enable_page_action_planning` — whether to plan tabs/CTAs/forms during observe
-- `enable_interaction_exploration` — whether to explore page-local interactions after route capture
-- `enable_extraction` — whether to run structured extraction during the run
-- `capture_report_screenshots` — whether to capture report-specific viewport/full-page images
-- `enable_timing_summary` — whether to emit `run_timing_summary.json`
-
-## Output
-
-After a run, `output/` contains:
-
-```
-output/
-├── screenshots/           # Full-page PNGs for every captured state
-├── dom_snapshots/          # Rendered HTML for every captured state
-├── artifacts/
-│   ├── inventory.json      # Page inventory with status, paths, novelty scores
-│   ├── sitemap.json        # Traversal graph (nodes, edges, groups)
-│   ├── coverage.json       # Per-page coverage (what was explored vs missed)
-│   ├── run_log.jsonl       # Step-by-step execution log
-│   └── analysis/           # Per-state analysis (components, layout, tokens)
-│       ├── state_xxxx.json
-│       └── ...
-└── reports/
-    ├── exploration_report.md              # Exploration summary
-    ├── competitive_analysis_structured.md # Compact structured analysis
-    ├── competitive_analysis_readable.md   # Stakeholder-facing report with selected screenshots
-    └── competitive_analysis.md            # Optional LLM-authored narrative fallback/output
+Options:
+  --config, -c PATH
+  --batch-config PATH
+  --profile TEXT
+  --max-states, -s INTEGER
+  --max-depth, -d INTEGER
+  --headless
+  --clear
 ```
 
-## Key Features
+Rules:
 
-- **Budget-aware** — stops after `max_states` captures, never runs forever
-- **Profile-aware runs** — `smoke_fast`, `demo`, and `full` let us separate quick validation from deeper analysis
-- **Novelty scoring** — DOM fingerprinting skips near-duplicate pages (e.g., 20 identical table views)
-- **Agent-loop foundation** – the main loop is being refactored from fixed exploration into observe/decide/act behavior
-- **Goal-driven decisions** – pending actions are prioritized against the task goal and what has already worked on the current domain
-- **Action validation** – the runtime checks for meaningful state change after important actions instead of assuming success
-- **Site memory** – the agent records selector/label success and challenge events into `site_memory.json`
-- **Repeated understanding** — the engine can refresh page understanding after route capture and key interaction captures
-- **Access-mode support** — public entry, existing-account login, and first-pass email registration are all supported
-- **Captcha / anti-bot awareness** — the engine detects common challenge indicators and can pause/report instead of blindly continuing
-- **Recovery** — retries on failure, re-authenticates on session expiry, backtracks on dead ends
-- **Structured logging** — every action is logged with timestamp, duration, result, and reason
-- **Works without APIs for the core path** — browser control and local analysis do not require model APIs
-- **Framework-agnostic** — configurable selectors support Element Plus, Ant Design, Bootstrap, and custom UIs
+- Use either `--batch-config` or direct target URLs, not both
+- Direct URL mode accepts at most three targets
+- `--clear` clears the configured output root before the run
 
-## Workflow with Claude/ChatGPT
+## Run Profiles
 
-## Current Extensions
+Available profiles:
 
-- Optional vision-enhanced page understanding
-- Structured extraction for list/detail/form pages
-- Optional LLM synthesis for the final competitive-analysis report
-- Dataset artifacts:
-  - `dataset.jsonl`
-  - `dataset_summary.json`
-  - `extraction_failures.json`
-- Competitive-analysis outputs:
-  - `competitive_analysis.json`
-  - `competitive_analysis.md`
-  - `competitive_analysis_readable.md`
-  - `competitive_analysis_structured.md`
-  - `competitive_analysis_llm.json` when synthesis is enabled
+- `default`
+- `smoke_fast`
+- `demo`
+- `full`
 
-Notes:
-- Core browser control and local analysis work without API keys
-- Vision enhancement requires API credentials because screenshot understanding is provider-backed
-- Final-report LLM synthesis also requires API credentials if enabled
-- The readable report now prefers viewport-style screenshots for most pages while keeping full-page captures as archive evidence
-- `run_timing_summary.json` helps show whether time is being spent in navigation, observation, extraction, or finalization
+Typical use:
 
-The intended workflow:
+- `smoke_fast` for quick runtime validation
+- `demo` for visible, presentation-friendly runs
+- `full` for deeper evidence collection
 
-1. Run the agent: `python -m src.cli`
-2. Review `exploration_report.md`, `competitive_analysis_readable.md`, and `competitive_analysis.md`
-3. Bring the outputs to Claude Code or ChatGPT
-4. Ask for a product teardown, frontend rebuild, or benchmark comparison using the generated artifacts
+## UX Reporting
 
-For a very fast validation pass:
+The current reporting path is UX-only.
 
-1. Use `python -m src.cli --config config/smoke_test_public_fast.yaml`
-2. Or apply `--profile smoke_fast` to an existing config
-3. Review `run_timing_summary.json` to see where the run spent time
+`ux_report.md` is generated from:
 
-For multi-site compare runs:
+- captured states
+- run log
+- operation trace
+- explored site hierarchy
+- screenshots
+- page insights
+- coverage and extraction artifacts
 
-1. Create a batch YAML with two or more site configs
-2. Run `python -m src.cli --batch-config your_batch.yaml`
-3. Review each site's readable report plus the generated `comparison_report.md`
+The report is intended to read like a reviewer memo, not a raw crawler dump.
 
-## Requirements
+## Offline Regeneration
 
-- Python 3.11+
-- Playwright + Chromium
-- A visitor/test account for the target website
+You can regenerate the UX report and supporting runtime artifacts from an existing run without rerunning the browser:
 
-## Manual Verification
+```bash
+python -m src.tools.regenerate_reports --config config/smoke_test_ponder_ux.yaml
+```
 
-- Browser runs stay visible during interactive auth and registration testing.
-- If a signup flow reaches an email-verification step, the run can pause in the terminal instead of exiting immediately.
-- You can type the verification code into the terminal so the agent fills it, paste the verification URL / magic link into the terminal, or complete the step manually in the visible browser and then press Enter to continue.
-- If a captcha / Cloudflare challenge appears and `captcha_policy` is `pause_and_report`, the runtime now freezes automation, keeps the same visible browser session open, and waits for you to clear the challenge before it resumes.
-- Optional selector knobs for this step are `verification_code_selector` and `verification_submit_selector`.
+This is useful when:
+
+- the captured artifacts are already good
+- the report logic changed
+- you want to iterate on reporting without paying the runtime cost again
+
+## Example Configs
+
+Useful configs in `config/`:
+
+- `smoke_test_public.yaml`
+- `smoke_test_public_fast.yaml`
+- `smoke_test_lmarena_demo.yaml`
+- `smoke_test_ponder_ux.yaml`
+- `smoke_test_ponder_ux_deep.yaml`
+- `smoke_test_batch.yaml`
+
+## Practical Workflow
+
+1. Run a target site with a bounded budget.
+2. Inspect `reports/ux_report.md`.
+3. Use `reports/operation_trace.md` and `reports/site_hierarchy.md` to understand what the agent actually did.
+4. Open the linked screenshots and DOM snapshots when you need to verify a specific claim.
+5. Regenerate reports offline if you improve the reporting logic.
+
+## Status
+
+This is an actively iterated codebase aimed at evidence-backed UX reconnaissance.
+
+The strongest current claim is:
+
+> It can run a real browser session, preserve a usable evidence trail, and turn that trail into a grounded UX report.

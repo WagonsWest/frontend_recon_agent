@@ -51,17 +51,9 @@ class Authenticator:
         mode = self._resolve_mode()
         if mode in {"public", "register"}:
             return True
-        if mode == "manual":
-            url = await self.controller.get_url()
-            if self._looks_like_auth_url(url):
-                return False
-            if await self._looks_like_verification_step():
-                return False
-            return not await self._looks_like_auth_surface()
-        if not self.config.login.username or not self.config.login.password:
-            return True
-        url = await self.controller.get_url()
-        return not self._looks_like_auth_url(url)
+        if await self._looks_like_verification_step():
+            return False
+        return not await self._looks_like_auth_surface()
 
     async def re_login(self) -> bool:
         """Re-authenticate if session expired."""
@@ -141,8 +133,7 @@ class Authenticator:
                 except Exception:
                     pass
 
-            current_url = await self.controller.get_url()
-            if not self._looks_like_auth_url(current_url) and not await self._looks_like_auth_surface():
+            if not await self._looks_like_auth_surface():
                 return True
 
             console.print(
@@ -196,11 +187,6 @@ class Authenticator:
             if flow == "register"
             else self.config.login.success_indicator
         )
-        auth_keywords = (
-            ("register", "signup", "sign-up", "create-account", "join", "verify", "verification")
-            if flow == "register"
-            else ("login", "auth", "signin", "sign-in", "verify", "verification")
-        )
 
         seen_signatures: set[str] = set()
         for step_index in range(4):
@@ -215,7 +201,7 @@ class Authenticator:
 
             await self._wait_after_submit()
 
-            if await self._verify_success(success_indicator=success_indicator, auth_keywords=auth_keywords):
+            if await self._verify_success(success_indicator=success_indicator):
                 return True
 
             if await self._looks_like_verification_step():
@@ -225,7 +211,7 @@ class Authenticator:
                 f"[cyan]Auth step {step_index + 1} completed; checking whether another auth step is required...[/cyan]"
             )
 
-        if await self._verify_success(success_indicator=success_indicator, auth_keywords=auth_keywords):
+        if await self._verify_success(success_indicator=success_indicator):
             return True
 
         if await self._looks_like_verification_step():
@@ -300,7 +286,7 @@ class Authenticator:
                 markers.append(key)
         return "|".join(markers)
 
-    async def _verify_success(self, success_indicator: str, auth_keywords: tuple[str, ...]) -> bool:
+    async def _verify_success(self, success_indicator: str) -> bool:
         page = self.controller.page
         if success_indicator:
             try:
@@ -313,8 +299,7 @@ class Authenticator:
             console.print("[red]Verification is still required[/red]")
             return False
 
-        current_url = page.url.lower()
-        if not self._looks_like_auth_url(current_url) and not await self._looks_like_auth_surface():
+        if not await self._looks_like_auth_surface():
             return True
 
         console.print("[red]Still on an auth page after submit[/red]")
@@ -356,12 +341,6 @@ class Authenticator:
                 item = locator.nth(index)
                 if not await item.is_visible():
                     continue
-                href = ((await item.get_attribute("href")) or "").lower()
-                label = " ".join(((await item.text_content()) or "").split()).strip().lower()
-                if any(token in href for token in [".pdf", "terms", "privacy", "legal"]):
-                    continue
-                if label in {"terms of use", "privacy policy"}:
-                    continue
                 await item.click()
                 return True
             except Exception:
@@ -372,10 +351,6 @@ class Authenticator:
         if not selector or not value:
             return
         await self._fill_first_visible(selector, value, scope=scope)
-
-    def _looks_like_auth_url(self, url: str) -> bool:
-        lowered = url.lower()
-        return any(term in lowered for term in ["login", "auth", "signin", "sign-in", "signup", "register", "join"])
 
     async def _looks_like_auth_surface(self) -> bool:
         if await self._has_visible_match(self.config.login.verification_code_selector):
@@ -389,23 +364,7 @@ class Authenticator:
         ]
         if any([await self._has_visible_match(selector) for selector in auth_input_selectors if selector]):
             return True
-
-        text_matches = await self.controller.evaluate("""
-            () => {
-                const text = (document.body?.innerText || '').toLowerCase();
-                const phrases = [
-                    'log in or sign up',
-                    'continue with a trusted provider or email',
-                    'sign in',
-                    'sign up',
-                    'register',
-                    'continue with email',
-                    'enter your email'
-                ];
-                return phrases.filter((phrase) => text.includes(phrase));
-            }
-        """, default=[])
-        return bool(text_matches)
+        return False
 
     async def _has_visible_match(self, selector: str, scope=None) -> bool:
         if not selector:
@@ -426,14 +385,6 @@ class Authenticator:
         container_selectors = [
             "form",
             "[role='dialog']",
-            "[class*='login']",
-            "[class*='auth']",
-            "[class*='signin']",
-            "[class*='sign-in']",
-            "[class*='signup']",
-            "[class*='sign-up']",
-            "[data-testid*='login']",
-            "[data-testid*='auth']",
         ]
         auth_inputs = [
             self.config.login.username_selector,
@@ -518,32 +469,7 @@ class Authenticator:
         except Exception:
             visible_inputs = 0
 
-        text_matches = await self.controller.evaluate("""
-            () => {
-                const text = (document.body?.innerText || '').toLowerCase();
-                const phrases = [
-                    'verification code',
-                    'enter code',
-                    'enter the code',
-                    'one-time code',
-                    'otp',
-                    'login link has been sent',
-                    'magic link',
-                    'check your inbox',
-                    'check your email',
-                    'verify your email',
-                    'verification email',
-                    'confirm your email',
-                    'activation code',
-                    '6-digit code'
-                ];
-                return phrases.filter((phrase) => text.includes(phrase));
-            }
-        """, default=[])
-
-        current_url = page.url.lower()
-        url_hint = any(token in current_url for token in ["verify", "verification", "confirm", "activate"])
-        return bool(visible_inputs or text_matches or url_hint)
+        return bool(visible_inputs)
 
     async def _complete_manual_verification(self) -> bool:
         if not self.config.task.human_assistance_allowed:
@@ -592,17 +518,6 @@ class Authenticator:
 
             if await self._verify_success(
                 success_indicator=self.config.login.registration_success_indicator or self.config.login.success_indicator,
-                auth_keywords=(
-                    "register",
-                    "signup",
-                    "sign-up",
-                    "create-account",
-                    "join",
-                    "verify",
-                    "verification",
-                    "confirm",
-                    "activate",
-                ),
             ):
                 return True
 

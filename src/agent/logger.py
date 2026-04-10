@@ -76,6 +76,10 @@ class RunLogger:
     def step_count(self) -> int:
         return self._step
 
+    def rows(self) -> list[dict]:
+        """Return the in-memory log entries as plain dict rows."""
+        return [asdict(entry) for entry in self._entries]
+
     def summary(self) -> dict:
         """Return aggregate timing stats by phase and action."""
         phase_stats: dict[str, dict[str, int]] = {}

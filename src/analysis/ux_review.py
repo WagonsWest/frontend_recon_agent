@@ -1,46 +1,47 @@
-"""Reviewer-style UX memo orchestration built from rich browser artifacts."""
+"""Model-light UX review synthesis grounded in runtime artifacts."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Iterable
-
-from bs4 import BeautifulSoup
+from typing import Any, Iterable
+from urllib.parse import urlparse
 
 from src.agent.state import AgentState, StateSnapshot
-from src.analysis.competitive_report import CompetitiveAnalysis
-from src.analysis.report_text import best_surface_label, clean_report_text, display_label, route_family_from_url
+from src.analysis.report_text import best_surface_label, clean_report_text, display_label
 
 
 @dataclass
-class UXSnapshotContext:
-    snapshot: StateSnapshot
+class UXSurface:
+    key: str
     label: str
-    page_type: str
-    route_family: str
-    headings: list[str] = field(default_factory=list)
-    action_labels: list[str] = field(default_factory=list)
-    input_prompts: list[str] = field(default_factory=list)
-    interaction_hints: list[str] = field(default_factory=list)
-    concepts: list[str] = field(default_factory=list)
-    has_contenteditable: bool = False
-    has_upgrade_cta: bool = False
-    text_blob: str = ""
+    url: str
+    state_id: str
+    title: str = ""
+    page_type: str = "unknown"
+    screenshot_path: str = ""
+    html_path: str = ""
+    actions: list[str] = field(default_factory=list)
+    hints: list[str] = field(default_factory=list)
+    prompts: list[str] = field(default_factory=list)
 
     @property
-    def screenshot_path(self) -> str:
-        return str(self.snapshot.metadata.get("report_screenshot_path") or self.snapshot.screenshot_path)
+    def all_texts(self) -> list[str]:
+        return [self.label, self.title, *self.actions, *self.hints, *self.prompts]
+
+
+@dataclass
+class UXFlowStep:
+    title: str
+    detail: str
 
 
 @dataclass
 class UXReviewFinding:
-    key: str
     title: str
     summary: str
     why_it_matters: str
     evidence: list[str] = field(default_factory=list)
-    related_urls: list[str] = field(default_factory=list)
+    related_surface_keys: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -54,9 +55,10 @@ class UXRecommendation:
 class UXVisual:
     title: str
     summary: str
-    caption: str
     image_path: str
-    related_key: str
+    html_path: str
+    state_id: str
+    caption: str
 
 
 @dataclass
@@ -68,6 +70,8 @@ class UXReviewMemo:
     overall_assessment: str
     scope_paths: list[str] = field(default_factory=list)
     scope_notes: list[str] = field(default_factory=list)
+    run_evidence: list[str] = field(default_factory=list)
+    flow_steps: list[UXFlowStep] = field(default_factory=list)
     strengths: list[UXReviewFinding] = field(default_factory=list)
     issues: list[UXReviewFinding] = field(default_factory=list)
     new_user_judgment: str = ""
@@ -78,389 +82,274 @@ class UXReviewMemo:
 
 
 class UXReviewOrchestrator:
-    """Turn captures into a judgment-oriented UX review memo."""
-
-    CAPABILITY_KEYWORDS = {
-        "create": ("new", "create", "start", "begin", "新建", "创建", "开始"),
-        "ask": ("ask", "question", "describe", "prompt", "输入", "描述任务", "问"),
-        "files": ("file", "files", "upload", "import", "source", "资料", "文件", "导入", "分析文件"),
-        "research": ("research", "search", "finder", "deep research", "slides", "diagram", "研究", "资料查找", "制作"),
-    }
-    CONCEPT_MAP = {
-        "Project": ("project", "项目"),
-        "Board": ("board", "看板"),
-        "Document": ("document", "文档"),
-        "Playground": ("playground",),
-        "Agent": ("agent",),
-        "Editor": ("editor",),
-        "Space": ("space", "workspace", "空间"),
-    }
+    """Compose a reviewer-style UX memo from runtime artifacts."""
 
     def build(
         self,
         state: AgentState,
-        analysis: CompetitiveAnalysis,
         page_insights: dict[str, dict] | None,
         extraction_results: dict[str, dict] | None,
+        run_log_entries: list[dict] | None = None,
+        coverage_data: dict[str, dict] | None = None,
+        operation_trace: dict[str, Any] | None = None,
+        site_hierarchy: dict[str, Any] | None = None,
     ) -> UXReviewMemo:
         page_insights = page_insights or {}
         extraction_results = extraction_results or {}
-        insights_by_url = self._insights_by_url(page_insights)
-        snapshots = sorted(state.states.values(), key=lambda item: item.timestamp)
-        contexts = [self._snapshot_context(snapshot, insights_by_url.get(snapshot.url, {})) for snapshot in snapshots]
+        run_log_entries = run_log_entries or []
+        coverage_data = coverage_data or {}
+        operation_trace = operation_trace or {}
+        site_hierarchy = site_hierarchy or {}
 
-        strengths = self._strengths(contexts)
-        issues = self._issues(contexts)
+        surfaces = self._build_surfaces(state, page_insights)
+        visuals = self._visuals(surfaces)
+        flow_steps = self._flow_steps(operation_trace)
+        run_evidence = self._run_evidence(state, operation_trace, site_hierarchy, coverage_data)
+        scope_paths = self._scope_paths(surfaces, site_hierarchy)
+        scope_notes = self._scope_notes(surfaces, extraction_results, coverage_data, operation_trace)
+        strengths = self._strengths(state, visuals, run_evidence, scope_paths)
+        issues = self._issues(state, operation_trace, site_hierarchy, scope_paths)
         score = self._score(strengths, issues)
-        target = analysis.target or (contexts[0].snapshot.url if contexts else "unknown")
+        recommendations = self._recommendations(issues)
+
+        target = self._target_label(state, surfaces)
+        overall_assessment = self._overall_assessment(score, strengths, issues)
+        new_user_judgment = self._new_user_judgment(issues)
+        experienced_user_judgment = self._experienced_user_judgment(strengths, issues)
+        conclusion = self._conclusion(score, strengths, issues, scope_paths)
 
         return UXReviewMemo(
             target=target,
-            evaluation_mode="Post-login exploratory pass grounded in browser captures, DOM snapshots, and page insights.",
-            evaluation_lens=[
-                "first-use clarity",
-                "task initiation efficiency",
-                "information architecture",
-                "interaction load",
-            ],
+            evaluation_mode="基于真实浏览器访问、截图、DOM 快照、page insight 与运行日志的体验审查",
+            evaluation_lens=["首次使用体验", "任务发起效率", "信息架构清晰度", "可理解性", "操作负担"],
             score=score,
-            overall_assessment=self._overall_assessment(score, strengths, issues),
-            scope_paths=[context.label for context in contexts[:6]],
-            scope_notes=self._scope_notes(contexts, analysis, extraction_results),
+            overall_assessment=overall_assessment,
+            scope_paths=scope_paths,
+            scope_notes=scope_notes,
+            run_evidence=run_evidence,
+            flow_steps=flow_steps,
             strengths=strengths,
             issues=issues,
-            new_user_judgment=self._new_user_judgment(score, strengths, issues),
-            experienced_user_judgment=self._experienced_user_judgment(score, strengths, issues),
-            recommendations=self._recommendations(issues),
-            conclusion=self._conclusion(strengths, issues),
-            visuals=self._visuals(contexts, strengths, issues),
+            new_user_judgment=new_user_judgment,
+            experienced_user_judgment=experienced_user_judgment,
+            recommendations=recommendations,
+            conclusion=conclusion,
+            visuals=visuals,
         )
 
-    def _snapshot_context(self, snapshot: StateSnapshot, insight: dict) -> UXSnapshotContext:
-        label = best_surface_label(
-            url=snapshot.url,
-            title=snapshot.title,
-            capture_label=str(snapshot.metadata.get("capture_label", "")).strip(),
-            fallback="Captured surface",
-        )
-        page_type = self._page_type(snapshot, insight)
-        dom = self._extract_dom_signals(Path(snapshot.html_path))
-        interaction_hints = [
-            clean_report_text(str(item.get("label", "")))
-            for item in (insight.get("interaction_hints") or [])
+    def _build_surfaces(self, state: AgentState, page_insights: dict[str, dict]) -> list[UXSurface]:
+        insights = {str(key): value for key, value in page_insights.items()}
+        snapshots = sorted(state.states.values(), key=lambda item: item.timestamp)
+        surfaces: list[UXSurface] = []
+        for snapshot in snapshots:
+            insight = insights.get(snapshot.id, {})
+            surface = UXSurface(
+                key=snapshot.id,
+                label=self._surface_label(snapshot),
+                url=snapshot.url,
+                state_id=snapshot.id,
+                title=clean_report_text(snapshot.title),
+                page_type=self._page_type(insight),
+                screenshot_path=str(snapshot.metadata.get("report_screenshot_path") or snapshot.screenshot_path),
+                html_path=str(snapshot.html_path),
+                actions=self._dedupe_texts(self._hint_labels(insight), limit=10),
+                hints=self._dedupe_texts(self._hint_labels(insight), limit=10),
+                prompts=self._dedupe_texts(self._prompt_texts(snapshot), limit=5),
+            )
+            surfaces.append(surface)
+        return surfaces
+
+    def _surface_label(self, snapshot: StateSnapshot) -> str:
+        return clean_report_text(
+            best_surface_label(
+                url=snapshot.url,
+                title=snapshot.title,
+                capture_label=str(snapshot.metadata.get("capture_label", "") or ""),
+                fallback=snapshot.title or snapshot.url,
+            )
+        ) or display_label(snapshot.metadata.get("capture_context", "route"))
+
+    def _page_type(self, insight: dict[str, Any]) -> str:
+        page_type = clean_report_text(str(insight.get("page_type_vision") or insight.get("page_type_dom") or ""))
+        return page_type or "unknown"
+
+    def _hint_labels(self, insight: dict[str, Any]) -> list[str]:
+        labels: list[str] = []
+        for item in insight.get("interaction_hints", []) or []:
+            if isinstance(item, dict):
+                text = clean_report_text(str(item.get("label", "")))
+                if text:
+                    labels.append(text)
+        return labels
+
+    def _prompt_texts(self, snapshot: StateSnapshot) -> list[str]:
+        prompts: list[str] = []
+        for key in ("capture_label", "capture_context"):
+            text = clean_report_text(str(snapshot.metadata.get(key, "")))
+            if text:
+                prompts.append(text)
+        return prompts
+
+    def _target_label(self, state: AgentState, surfaces: list[UXSurface]) -> str:
+        if surfaces:
+            parsed = urlparse(surfaces[0].url)
+            return parsed.netloc or surfaces[0].url
+        if state.states:
+            snapshot = next(iter(state.states.values()))
+            parsed = urlparse(snapshot.url)
+            return parsed.netloc or snapshot.url
+        parsed = urlparse(getattr(state, "root_url", ""))
+        return parsed.netloc or "unknown"
+
+    def _scope_paths(self, surfaces: list[UXSurface], site_hierarchy: dict[str, Any]) -> list[str]:
+        focus_paths = [clean_report_text(str(item)) for item in site_hierarchy.get("focus_paths", []) if clean_report_text(str(item))]
+        if focus_paths:
+            return focus_paths[:10]
+        labels = [surface.label for surface in surfaces if surface.label]
+        return self._dedupe_texts(labels, limit=10)
+
+    def _scope_notes(
+        self,
+        surfaces: list[UXSurface],
+        extraction_results: dict[str, dict],
+        coverage_data: dict[str, dict],
+        operation_trace: dict[str, Any],
+    ) -> list[str]:
+        notes: list[str] = []
+        if surfaces:
+            notes.append(f"本轮稳定落下来的代表性界面共有 `{len(surfaces)}` 个。")
+        if extraction_results:
+            successful = sum(1 for item in extraction_results.values() if item.get("status") == "success")
+            notes.append(f"结构化抽取成功 `{successful}` 次。")
+        if coverage_data:
+            notes.append(f"coverage 产物中记录了 `{len(coverage_data)}` 个目标节点。")
+        trace_stats = operation_trace.get("stats", {})
+        if trace_stats:
+            notes.append(
+                f"运行过程中共发生 `{trace_stats.get('selected_targets', 0)}` 次 route 选择和 `{trace_stats.get('selected_decisions', 0)}` 次页面动作选择。"
+            )
+        return notes[:5]
+
+    def _run_evidence(
+        self,
+        state: AgentState,
+        operation_trace: dict[str, Any],
+        site_hierarchy: dict[str, Any],
+        coverage_data: dict[str, dict],
+    ) -> list[str]:
+        evidence: list[str] = []
+        trace_stats = operation_trace.get("stats", {})
+        if trace_stats:
+            evidence.append(
+                f"全程共记录 `{trace_stats.get('total_steps', 0)}` 个运行步骤，其中新 state 捕捉 `{trace_stats.get('captured_states', 0)}` 次。"
+            )
+        hierarchy_stats = site_hierarchy.get("stats", {})
+        if hierarchy_stats:
+            evidence.append(
+                f"已发现节点 `{hierarchy_stats.get('total_nodes', 0)}` 个，实际访问 `{hierarchy_stats.get('visited_nodes', 0)}` 个，最大深度 `depth {hierarchy_stats.get('max_depth', 0)}`。"
+            )
+        if coverage_data:
+            evidence.append(f"coverage 文件中保留了 `{len(coverage_data)}` 份页面覆盖记录。")
+        if state.states:
+            evidence.append(f"本轮共保留 `{len(state.states)}` 份可回看的 state 快照。")
+        return evidence[:6]
+
+    def _flow_steps(self, operation_trace: dict[str, Any]) -> list[UXFlowStep]:
+        steps: list[UXFlowStep] = []
+        for index, item in enumerate(operation_trace.get("key_steps", [])[:6], start=1):
+            title = clean_report_text(str(item.get("action_label", ""))) or f"Step {index}"
+            target = clean_report_text(str(item.get("target", ""))) or "当前页面"
+            result = clean_report_text(str(item.get("result_label", ""))) or "未知结果"
+            detail = clean_report_text(str(item.get("detail", ""))) or "无额外说明"
+            steps.append(UXFlowStep(title=f"{index}. {title}", detail=f"面向 `{target}`，结果为 {result}。{detail}"))
+        return steps
+
+    def _strengths(
+        self,
+        state: AgentState,
+        visuals: list[UXVisual],
+        run_evidence: list[str],
+        scope_paths: list[str],
+    ) -> list[UXReviewFinding]:
+        findings: list[UXReviewFinding] = []
+        if run_evidence:
+            findings.append(
+                UXReviewFinding(
+                    title="运行链路完整保留",
+                    summary="这次输出不只保留了最终结论，还保留了整条访问与决策轨迹。",
+                    why_it_matters="这让报告可以回溯，便于判断问题到底来自产品本身还是探索过程。",
+                    evidence=run_evidence[:2],
+                )
+            )
+        if scope_paths:
+            findings.append(
+                UXReviewFinding(
+                    title="探索结构可读",
+                    summary="已探索的网站上下级结构被整理成了可读的分支视图。",
+                    why_it_matters="阅读者可以快速知道 agent 实际走到了哪里，而不是只看到孤立截图。",
+                    evidence=[f"代表性分支包括：{'、'.join(f'`{item}`' for item in scope_paths[:4])}。"],
+                )
+            )
+        if len(visuals) >= 2 or len(state.states) >= 3:
+            findings.append(
+                UXReviewFinding(
+                    title="截图证据与 state 快照互相对应",
+                    summary="报告可以把截图、DOM 快照和 state 标识对应起来。",
+                    why_it_matters="这让结论不只停留在描述层，而能直接回看当时页面。",
+                    evidence=[f"本轮选出了 `{len(visuals)}` 张代表性截图。"],
+                )
+            )
+        return findings[:4]
+
+    def _issues(
+        self,
+        state: AgentState,
+        operation_trace: dict[str, Any],
+        site_hierarchy: dict[str, Any],
+        scope_paths: list[str],
+    ) -> list[UXReviewFinding]:
+        findings: list[UXReviewFinding] = []
+        trace_stats = operation_trace.get("stats", {})
+        hierarchy_stats = site_hierarchy.get("stats", {})
+        captured_states = int(trace_stats.get("captured_states", len(state.states) or 0))
+        max_depth = int(hierarchy_stats.get("max_depth", 0))
+        no_effect = [
+            item for item in operation_trace.get("steps", [])
+            if str(item.get("action", "")) in {"page_action_no_effect", "page_action_skipped"}
         ]
-        interaction_hints = [item for item in interaction_hints if item]
-        concepts = self._detect_concepts([dom["text_blob"], *dom["action_labels"], *dom["headings"], *interaction_hints])
-        return UXSnapshotContext(
-            snapshot=snapshot,
-            label=label,
-            page_type=page_type,
-            route_family=route_family_from_url(snapshot.url),
-            headings=dom["headings"],
-            action_labels=dom["action_labels"],
-            input_prompts=dom["input_prompts"],
-            interaction_hints=interaction_hints,
-            concepts=concepts,
-            has_contenteditable=dom["has_contenteditable"],
-            has_upgrade_cta=dom["has_upgrade_cta"],
-            text_blob=dom["text_blob"],
-        )
 
-    def _extract_dom_signals(self, path: Path) -> dict[str, object]:
-        if not path.exists():
-            return {
-                "headings": [],
-                "action_labels": [],
-                "input_prompts": [],
-                "has_contenteditable": False,
-                "has_upgrade_cta": False,
-                "text_blob": "",
-            }
-
-        html = path.read_text(encoding="utf-8")
-        soup = BeautifulSoup(html, "lxml")
-        for tag in soup(["script", "style", "noscript", "svg"]):
-            tag.decompose()
-
-        headings = self._collect_texts(soup.select("h1, h2, h3, h4"), limit=10)
-        action_labels = self._collect_texts(
-            soup.select("button, a, [role='button'], [data-testid*='button']"),
-            limit=24,
-        )
-        input_prompts = self._collect_input_prompts(soup)
-        text_blob = " ".join(
-            [*headings, *action_labels, *input_prompts, clean_report_text(soup.get_text(" ", strip=True)[:4000])]
-        ).strip()
-
-        contenteditable_nodes = soup.select("[contenteditable='true']")
-        has_contenteditable = bool(contenteditable_nodes)
-        has_upgrade_cta = any(self._contains_any(text, ("upgrade", "pricing", "升级", "订阅")) for text in action_labels)
-
-        return {
-            "headings": headings,
-            "action_labels": action_labels,
-            "input_prompts": input_prompts,
-            "has_contenteditable": has_contenteditable,
-            "has_upgrade_cta": has_upgrade_cta,
-            "text_blob": text_blob,
-        }
-
-    def _collect_texts(self, elements: Iterable, limit: int) -> list[str]:
-        items: list[str] = []
-        seen: set[str] = set()
-        for element in elements:
-            text = clean_report_text(element.get_text(" ", strip=True))
-            if not text:
-                text = clean_report_text(
-                    element.get("aria-label") or element.get("title") or ""
-                )
-            if not text or len(text) > 80 or text in seen:
-                continue
-            seen.add(text)
-            items.append(text)
-            if len(items) >= limit:
-                break
-        return items
-
-    def _collect_input_prompts(self, soup: BeautifulSoup) -> list[str]:
-        items: list[str] = []
-        seen: set[str] = set()
-        for element in soup.select("input, textarea, [contenteditable='true']"):
-            for candidate in (
-                element.get("placeholder"),
-                element.get("data-placeholder"),
-                element.get("aria-label"),
-                element.get_text(" ", strip=True),
-            ):
-                text = clean_report_text(str(candidate or ""))
-                if not text or len(text) > 120 or text in seen:
-                    continue
-                seen.add(text)
-                items.append(text)
-                break
-            if len(items) >= 12:
-                break
-        return items
-
-    def _page_type(self, snapshot: StateSnapshot, insight: dict) -> str:
-        page_type_vision = clean_report_text(str(insight.get("page_type_vision", "")))
-        if page_type_vision and page_type_vision != "unknown":
-            return display_label(page_type_vision)
-        page_type_dom = clean_report_text(str(insight.get("page_type_dom", "")))
-        if page_type_dom:
-            return display_label(page_type_dom)
-        return display_label(route_family_from_url(snapshot.url))
-
-    def _detect_concepts(self, texts: Iterable[str]) -> list[str]:
-        blob = " ".join(clean_report_text(text).lower() for text in texts if clean_report_text(text))
-        concepts: list[str] = []
-        for concept, keywords in self.CONCEPT_MAP.items():
-            if any(keyword.lower() in blob for keyword in keywords):
-                concepts.append(concept)
-        return concepts
-
-    def _strengths(self, contexts: list[UXSnapshotContext]) -> list[UXReviewFinding]:
-        strengths: list[UXReviewFinding] = []
-        entry = contexts[0] if contexts else None
-        if entry:
-            primary_actions = self._salient_actions(entry.action_labels)
-            categories = self._capability_categories(primary_actions + entry.input_prompts)
-            if len(categories) >= 2 and len(primary_actions) >= 3:
-                sample = ", ".join(f"`{label}`" for label in primary_actions[:5])
-                strengths.append(
-                    UXReviewFinding(
-                        key="entry_capability_clarity",
-                        title="The first workspace makes product breadth visible quickly",
-                        summary=(
-                            "The opening surface immediately signals that the product is more than a single chat box. "
-                            "Users can see multiple starting modes without digging through menus."
-                        ),
-                        why_it_matters="A broad capability surface can create early confidence that the tool can handle different types of knowledge work.",
-                        evidence=[
-                            f"`{entry.label}` exposes visible starting points such as {sample}.",
-                            *self._hint_evidence(entry, limit=2),
-                        ],
-                        related_urls=[entry.snapshot.url],
-                    )
-                )
-
-        workspace = self._first_matching(contexts, lambda item: item.page_type == "Dashboard" and bool(item.action_labels))
-        if workspace and len(workspace.action_labels) >= 4 and (workspace.input_prompts or workspace.interaction_hints):
-            strengths.append(
+        if captured_states < 3:
+            findings.append(
                 UXReviewFinding(
-                    key="blank_state_guidance",
-                    title="Blank-state and onboarding cues reduce dead-screen uncertainty",
-                    summary=(
-                        "The initial workspace does not feel empty in a broken or abandoned way. "
-                        "The page offers a prompt field, visible actions, and onboarding hints that tell the user what to do next."
-                    ),
-                    why_it_matters="First-time users tolerate complexity better when the screen still communicates a next action instead of a void.",
-                    evidence=[
-                        *[f"Input prompt: `{prompt}`." for prompt in workspace.input_prompts[:2]],
-                        *self._hint_evidence(workspace, limit=2),
-                    ],
-                    related_urls=[workspace.snapshot.url],
+                    title="有效状态证据仍然偏少",
+                    summary="虽然保留了完整链路，但最终沉淀为可审查 state 的页面还不够多。",
+                    why_it_matters="当证据面偏窄时，报告容易过度依赖首屏，难以覆盖中层流程。",
+                    evidence=[f"本轮可回看的 state 数量为 `{captured_states}`。"],
                 )
             )
-
-        if any(len(context.interaction_hints) >= 2 for context in contexts):
-            exemplar = max(contexts, key=lambda item: len(item.interaction_hints), default=None)
-            if exemplar:
-                strengths.append(
-                    UXReviewFinding(
-                        key="next_step_discoverability",
-                        title="Visible next-step cues make the workspace reasonably self-explanatory",
-                        summary=(
-                            "Across the captured screens, the interface usually exposes what the next move is supposed to be, "
-                            "whether that means switching sections, starting from files, or opening a deeper workspace."
-                        ),
-                        why_it_matters="Strong next-step cues improve learnability even when the product surface is broad.",
-                        evidence=self._hint_evidence(exemplar, limit=3),
-                        related_urls=[exemplar.snapshot.url],
-                    )
-                )
-
-        if any(context.has_upgrade_cta for context in contexts) and any(
-            "research" in " ".join(context.action_labels).lower() or "研究" in context.text_blob for context in contexts
-        ):
-            strengths.append(
+        if no_effect:
+            findings.append(
                 UXReviewFinding(
-                    key="workflow_breadth",
-                    title="The product already reads like a real workbench, not a single-purpose tool",
-                    summary=(
-                        "The captured surfaces suggest that the product is trying to unify asking questions, importing sources, deeper research, and output-oriented work in one place."
-                    ),
-                    why_it_matters="That breadth can become a strong differentiator for repeat users if the product also improves its guidance layer.",
-                    evidence=[
-                        f"Observed route scope included {', '.join(f'`{context.label}`' for context in contexts[:4])}.",
-                    ],
-                    related_urls=[context.snapshot.url for context in contexts[:4]],
+                    title="探索预算仍有一部分消耗在无效动作上",
+                    summary="运行日志里仍然能看到一些没有形成新状态的动作。",
+                    why_it_matters="无效动作会挤占更深层页面的预算，也会让报告证据面变窄。",
+                    evidence=[f"无明显效果或被跳过的动作共 `{len(no_effect)}` 次。"],
                 )
             )
-
-        return strengths[:4]
-
-    def _issues(self, contexts: list[UXSnapshotContext]) -> list[UXReviewFinding]:
-        issues: list[UXReviewFinding] = []
-        entry = contexts[0] if contexts else None
-        if entry:
-            primary_actions = self._salient_actions(entry.action_labels)
-            categories = self._capability_categories(primary_actions + entry.input_prompts)
-            if len(categories) >= 2 and len(primary_actions) >= 4:
-                sample = ", ".join(f"`{label}`" for label in primary_actions[:6])
-                issues.append(
-                    UXReviewFinding(
-                        key="entry_overload",
-                        title="The first screen offers too many equally weighted starting points",
-                        summary=(
-                            "The opening workspace surfaces several ways to begin, but it does not clearly establish one primary path for a first-time user."
-                        ),
-                        why_it_matters="When many options look equally primary, users pay the cost of choosing before they have learned the product model.",
-                        evidence=[
-                            f"`{entry.label}` shows competing start points such as {sample}.",
-                            *self._hint_evidence(entry, limit=1),
-                        ],
-                        related_urls=[entry.snapshot.url],
-                    )
-                )
-
-        all_concepts = sorted({concept for context in contexts for concept in context.concepts})
-        if len(all_concepts) >= 4:
-            concept_text = ", ".join(f"`{concept}`" for concept in all_concepts[:6])
-            related = self._urls_with_concepts(contexts, all_concepts[:4])
-            issues.append(
+        if max_depth <= 1 and scope_paths:
+            findings.append(
                 UXReviewFinding(
-                    key="concept_density",
-                    title="The object model becomes visible faster than it becomes understandable",
-                    summary=(
-                        "The product exposes several core nouns early, but the relationship between those concepts is not obvious from the captured surfaces alone."
-                    ),
-                    why_it_matters="Users can handle many concepts if the hierarchy is clear; they struggle when the concepts appear before the mental model does.",
-                    evidence=[
-                        f"Concepts visible across the captured surfaces include {concept_text}.",
-                    ],
-                    related_urls=related,
+                    title="探索深度仍然偏浅",
+                    summary="当前证据更像围绕入口页展开，还没有稳定深入到更多中层工作流。",
+                    why_it_matters="如果深度不够，很多真正影响体验的承接与编辑流程不会进入报告。",
+                    evidence=[f"当前最大探索深度为 `depth {max_depth}`。"],
                 )
             )
-
-        crowded_workspace = self._first_matching(
-            contexts,
-            lambda item: item.page_type == "Dashboard" and len(self._salient_actions(item.action_labels)) >= 4 and len(item.input_prompts) >= 1,
-        )
-        if crowded_workspace:
-            visible_actions = self._salient_actions(crowded_workspace.action_labels)
-            issues.append(
-                UXReviewFinding(
-                    key="workspace_density",
-                    title="The workspace asks users to parse too much UI before they do one thing",
-                    summary=(
-                        "The captured dashboard surfaces expose multiple navigation concepts, action buttons, and monetization cues at once. "
-                        "That creates a strong power-user feel, but also raises the first-run comprehension cost."
-                    ),
-                    why_it_matters="A high-density workspace can feel capable and intimidating at the same time; without progressive disclosure it slows task initiation.",
-                    evidence=[
-                        f"`{crowded_workspace.label}` includes visible actions such as {', '.join(f'`{label}`' for label in visible_actions[:5])}.",
-                        *self._hint_evidence(crowded_workspace, limit=2),
-                    ],
-                    related_urls=[crowded_workspace.snapshot.url],
-                )
-            )
-
-        input_issue = self._first_matching(contexts, lambda item: item.has_contenteditable and bool(item.input_prompts))
-        if input_issue:
-            issues.append(
-                UXReviewFinding(
-                    key="input_affordance",
-                    title="The primary input relies on a light-weight contenteditable affordance",
-                    summary=(
-                        "The main task-entry area appears to be implemented as a contenteditable surface with placeholder-style guidance, "
-                        "rather than a strongly framed input with explicit semantics."
-                    ),
-                    why_it_matters="This can weaken both perceived affordance and accessibility, especially for users who are unsure where to start typing.",
-                    evidence=[
-                        *[f"Observed input prompt: `{prompt}`." for prompt in input_issue.input_prompts[:2]],
-                    ],
-                    related_urls=[input_issue.snapshot.url],
-                )
-            )
-
-        repeated_upgrade = [context for context in contexts if context.has_upgrade_cta]
-        if len(repeated_upgrade) >= 2:
-            issues.append(
-                UXReviewFinding(
-                    key="upgrade_pressure",
-                    title="Upgrade messaging stays visible during core work surfaces",
-                    summary=(
-                        "Pricing and plan-upgrade cues remain visible across multiple in-product screens, even while the user is still learning the workspace."
-                    ),
-                    why_it_matters="Persistent monetization cues are not inherently bad, but they can compete with onboarding attention during the first-run experience.",
-                    evidence=[
-                        f"Upgrade or plan text appears on {len(repeated_upgrade)} captured surfaces, including {', '.join(f'`{context.label}`' for context in repeated_upgrade[:3])}.",
-                    ],
-                    related_urls=[context.snapshot.url for context in repeated_upgrade[:3]],
-                )
-            )
-
-        return issues[:5]
+        return findings[:4]
 
     def _score(self, strengths: list[UXReviewFinding], issues: list[UXReviewFinding]) -> float:
-        score = 7.0
-        strength_weights = {
-            "entry_capability_clarity": 0.4,
-            "blank_state_guidance": 0.3,
-            "next_step_discoverability": 0.4,
-            "workflow_breadth": 0.3,
-        }
-        issue_weights = {
-            "entry_overload": 0.8,
-            "concept_density": 0.7,
-            "workspace_density": 0.7,
-            "input_affordance": 0.5,
-            "upgrade_pressure": 0.3,
-        }
-        score += sum(strength_weights.get(item.key, 0.2) for item in strengths)
-        score -= sum(issue_weights.get(item.key, 0.3) for item in issues)
-        return round(max(4.5, min(score, 8.8)), 1)
+        score = 6.8 + (0.4 * len(strengths)) - (0.5 * len(issues))
+        return round(max(4.8, min(score, 8.8)), 1)
 
     def _overall_assessment(
         self,
@@ -468,256 +357,108 @@ class UXReviewOrchestrator:
         strengths: list[UXReviewFinding],
         issues: list[UXReviewFinding],
     ) -> str:
-        issue_keys = {item.key for item in issues}
-        if {"entry_overload", "workspace_density"} & issue_keys:
-            return (
-                f"`{score:.1f} / 10`. The product already feels capable and ambitious, but the first-run experience still behaves more like a dense professional workbench than a clearly guided starting surface."
-            )
-        return f"`{score:.1f} / 10`. The captured experience is directionally strong, but still leaves visible gaps in guidance and workflow clarity."
+        if score >= 7.8 and not issues:
+            return "这版报告已经具备较强的证据完整性，能够直接作为 UX 评审底稿。"
+        if score >= 7.0:
+            return "这版报告已经接近成熟评审稿，优点是证据链完整，短板是覆盖面还可以继续扩。"
+        if strengths:
+            return "这版报告已经把证据链搭起来了，但还需要继续扩大 state 覆盖和中层流程证据。"
+        return "当前报告仍以基础证据整理为主，还没有形成足够扎实的评审面。"
 
-    def _scope_notes(
-        self,
-        contexts: list[UXSnapshotContext],
-        analysis: CompetitiveAnalysis,
-        extraction_results: dict[str, dict],
-    ) -> list[str]:
-        notes: list[str] = []
-        if contexts:
-            notes.append(
-                "Visited path set: " + ", ".join(f"`{context.label}`" for context in contexts[:6]) + "."
-            )
-        if not any("auth" in context.page_type.lower() for context in contexts):
-            notes.append("No standalone sign-in or onboarding capture was included in the reviewed states; this pass is strongest on post-login UX.")
-        if all(str(context.snapshot.metadata.get("capture_context", "")).lower() == "route" for context in contexts):
-            notes.append("The run stayed mostly in route-to-route navigation; it did not complete a deep task flow such as prompt submission, file import, or end-to-end research execution.")
-        successful_extractions = sum(1 for result in extraction_results.values() if result.get("status") == "success")
-        if extraction_results and successful_extractions == 0:
-            notes.append("Structured extraction was shallow on this pass, so the review leans more on interface evidence than content semantics.")
-        if len(contexts) <= 6:
-            notes.append("This was still a small-budget pass, so the findings should be treated as grounded but not exhaustive.")
-        return notes[:4]
-
-    def _new_user_judgment(
-        self,
-        score: float,
-        strengths: list[UXReviewFinding],
-        issues: list[UXReviewFinding],
-    ) -> str:
-        issue_keys = {item.key for item in issues}
-        if "entry_overload" in issue_keys or "concept_density" in issue_keys:
-            return (
-                "New users are likely to feel that the product is powerful before they feel that it is easy to start. "
-                "The opening workspace shows breadth and momentum, but it also asks them to choose and interpret several concepts at once."
-            )
-        return (
-            "New users should be able to recognize the product's core purpose quickly, though deeper workflow confidence would still benefit from more guided first-run sequencing."
-        )
+    def _new_user_judgment(self, issues: list[UXReviewFinding]) -> str:
+        if any(item.title == "有效状态证据仍然偏少" for item in issues):
+            return "对新用户而言，当前报告还更擅长解释入口体验，而不是完整的新手旅程。"
+        return "对新用户而言，这版报告已经能较好地解释首屏到下一步之间的体验承接。"
 
     def _experienced_user_judgment(
         self,
-        score: float,
         strengths: list[UXReviewFinding],
         issues: list[UXReviewFinding],
     ) -> str:
-        if any(item.key in {"workspace_density", "workflow_breadth"} for item in strengths + issues):
-            return (
-                "Experienced or research-heavy users are more likely to appreciate the dense workbench model, because the same complexity that slows first-run onboarding also increases perceived flexibility."
-            )
-        return (
-            "Experienced users would probably adapt quickly, but the current captures are not yet rich enough to judge advanced workflow efficiency confidently."
-        )
+        if strengths and not issues:
+            return "对熟练用户而言，这版报告已经能快速定位实际工作流中的摩擦点。"
+        return "对熟练用户而言，这版报告有可回看的运行证据，但中层流程覆盖还可以继续加深。"
 
     def _recommendations(self, issues: list[UXReviewFinding]) -> list[UXRecommendation]:
-        items: list[UXRecommendation] = []
-        issue_keys = [item.key for item in issues]
-        if "entry_overload" in issue_keys:
-            items.append(
-                UXRecommendation(
-                    title="Establish a single first-run start path",
-                    action="Promote one clear primary CTA on the first workspace, and demote the other starting modes into secondary or templated options.",
-                    rationale="This directly lowers choice cost on the first screen without removing product breadth.",
+        recommendations: list[UXRecommendation] = []
+        for issue in issues:
+            if issue.title == "有效状态证据仍然偏少":
+                recommendations.append(
+                    UXRecommendation(
+                        title="继续扩展稳定 state 覆盖",
+                        action="优先让 agent 更稳定地进入入口之后的一到两层页面，并确保每次成功进入后都沉淀成 state。",
+                        rationale="这样可以让报告不只停留在首页或弹层，而是覆盖真正的任务承接流程。",
+                    )
                 )
-            )
-        if "concept_density" in issue_keys:
-            items.append(
-                UXRecommendation(
-                    title="Explain the object model in-place",
-                    action="Add short explanatory copy or lightweight affordances that clarify how concepts such as project, board, document, agent, editor, or playground relate to each other.",
-                    rationale="Users can tolerate many concepts if the hierarchy is made explicit at the moment they encounter it.",
+            elif issue.title == "探索预算仍有一部分消耗在无效动作上":
+                recommendations.append(
+                    UXRecommendation(
+                        title="压缩无效动作占比",
+                        action="继续把下一步选择交给模型，并在动作无效果后更快降权或切换候选。",
+                        rationale="减少预算浪费后，有限 state 更容易花在高价值路径上。",
+                    )
                 )
-            )
-        if "workspace_density" in issue_keys:
-            items.append(
-                UXRecommendation(
-                    title="Use progressive disclosure on the initial workspace",
-                    action="Show the smallest useful set of first actions up front, and reveal advanced workspace controls after the user begins a task.",
-                    rationale="This preserves power-user depth while reducing first-run cognitive load.",
+            elif issue.title == "探索深度仍然偏浅":
+                recommendations.append(
+                    UXRecommendation(
+                        title="优先推进中层任务流",
+                        action="让探索目标从首屏入口延伸到创建、编辑、导入、结果页等中层界面。",
+                        rationale="这样报告才会更接近真正的产品体验评审，而不是入口观察。",
+                    )
                 )
-            )
-        if "input_affordance" in issue_keys:
-            items.append(
-                UXRecommendation(
-                    title="Strengthen the primary input affordance",
-                    action="Give the main input a clearer visual frame and stronger accessible semantics rather than relying mostly on placeholder-style guidance inside a contenteditable region.",
-                    rationale="A stronger input affordance improves both confidence and accessibility for first-time users.",
-                )
-            )
-        if "upgrade_pressure" in issue_keys:
-            items.append(
-                UXRecommendation(
-                    title="Reduce monetization competition during onboarding moments",
-                    action="Keep upgrade messaging present but visually subordinate while the user is still learning the primary workspace.",
-                    rationale="This helps early attention stay on task initiation rather than pricing posture.",
-                )
-            )
-        return items[:5]
+        return recommendations[:4]
 
-    def _conclusion(self, strengths: list[UXReviewFinding], issues: list[UXReviewFinding]) -> str:
-        issue_keys = {item.key for item in issues}
-        if {"entry_overload", "concept_density", "workspace_density"} & issue_keys:
-            return (
-                "The captured experience suggests a product that is already broad and serious, but still easier to admire than to enter smoothly. "
-                "The most valuable next step is not adding more capability; it is making the first-run path simpler, clearer, and more opinionated."
-            )
-        return (
-            "The captured experience suggests a promising product shape, but the next round of UX evidence should focus on one deeper task flow so the review can move beyond surface judgment."
-        )
-
-    def _visuals(
+    def _conclusion(
         self,
-        contexts: list[UXSnapshotContext],
+        score: float,
         strengths: list[UXReviewFinding],
         issues: list[UXReviewFinding],
-    ) -> list[UXVisual]:
+        scope_paths: list[str],
+    ) -> str:
+        strengths_text = strengths[0].title if strengths else "证据链仍在补齐"
+        issues_text = issues[0].title if issues else "当前没有明显的结构性短板"
+        scope_text = "、".join(f"`{item}`" for item in scope_paths[:3]) if scope_paths else "当前落下来的页面集合"
+        return (
+            f"综合来看，这版 UX 报告已经能围绕 {scope_text} 组织真实证据。"
+            f"它当前最有价值的地方是“{strengths_text}”，下一步最值得继续推进的是“{issues_text}”。"
+            f"综合评分为 `{score:.1f} / 10`。"
+        )
+
+    def _visuals(self, surfaces: list[UXSurface]) -> list[UXVisual]:
         visuals: list[UXVisual] = []
-        related_order = [
-            *(url for item in issues for url in item.related_urls),
-            *(url for item in strengths for url in item.related_urls),
-        ]
-        seen_urls: set[str] = set()
-        for url in related_order:
-            context = self._first_matching(contexts, lambda item, url=url: item.snapshot.url == url)
-            if not context or url in seen_urls:
+        for surface in surfaces:
+            if not surface.screenshot_path:
                 continue
-            screenshot_path = context.screenshot_path
-            if not screenshot_path or not Path(screenshot_path).exists():
-                continue
-            seen_urls.add(url)
             visuals.append(
                 UXVisual(
-                    title=context.label,
-                    summary=f"{context.label} ({context.page_type})",
-                    caption=self._visual_caption(context),
-                    image_path=screenshot_path,
-                    related_key=self._visual_related_key(context, strengths, issues),
+                    title=surface.label,
+                    summary=f"代表界面：{surface.label}",
+                    image_path=surface.screenshot_path,
+                    html_path=surface.html_path,
+                    state_id=surface.state_id,
+                    caption=f"该截图对应 `{surface.label}`，页面类型为 `{surface.page_type}`。",
                 )
             )
             if len(visuals) >= 4:
                 break
         return visuals
 
-    def _visual_caption(self, context: UXSnapshotContext) -> str:
-        if context.interaction_hints:
-            return "Key visible cue: " + context.interaction_hints[0]
-        if context.input_prompts:
-            return "Key input cue: " + context.input_prompts[0]
-        if context.action_labels:
-            return "Visible actions include " + ", ".join(f"`{label}`" for label in context.action_labels[:3]) + "."
-        return "Representative captured surface."
+    def _dedupe_texts(self, items: Iterable[str], limit: int) -> list[str]:
+        return _dedupe_texts(items, limit=limit)
 
-    def _visual_related_key(
-        self,
-        context: UXSnapshotContext,
-        strengths: list[UXReviewFinding],
-        issues: list[UXReviewFinding],
-    ) -> str:
-        for item in issues + strengths:
-            if context.snapshot.url in item.related_urls:
-                return item.key
-        return "general"
 
-    def _hint_evidence(self, context: UXSnapshotContext, limit: int) -> list[str]:
-        return [f"Observed hint: `{item}`." for item in context.interaction_hints[:limit]]
-
-    def _salient_actions(self, labels: list[str]) -> list[str]:
-        items: list[str] = []
-        seen: set[str] = set()
-        for label in labels:
-            text = clean_report_text(label)
-            if not text or text in seen or self._is_low_signal_action(text):
-                continue
-            seen.add(text)
-            items.append(text)
-        return items
-
-    def _is_low_signal_action(self, text: str) -> bool:
-        lowered = clean_report_text(text).lower()
-        if not lowered:
-            return True
-        low_signal_keywords = (
-            "upgrade",
-            "pricing",
-            "free",
-            "subscribe",
-            "billing",
-            "return",
-            "back",
-            "legacy",
-            "home",
-            "profile",
-            "account",
-            "settings",
-            "help",
-            "立即升级",
-            "升级",
-            "订阅",
-            "返回",
-            "旧版",
-            "首页",
-            "设置",
-            "帮助",
-        )
-        return any(keyword in lowered for keyword in low_signal_keywords)
-
-    def _urls_with_concepts(self, contexts: list[UXSnapshotContext], concepts: list[str]) -> list[str]:
-        related: list[str] = []
-        wanted = set(concepts)
-        for context in contexts:
-            if wanted.intersection(context.concepts):
-                related.append(context.snapshot.url)
-        return related[:3]
-
-    def _capability_categories(self, texts: Iterable[str]) -> set[str]:
-        categories: set[str] = set()
-        for text in texts:
-            lowered = clean_report_text(text).lower()
-            for category, keywords in self.CAPABILITY_KEYWORDS.items():
-                if any(keyword.lower() in lowered for keyword in keywords):
-                    categories.add(category)
-        return categories
-
-    def _contains_any(self, text: str, keywords: Iterable[str]) -> bool:
-        lowered = clean_report_text(text).lower()
-        return any(keyword.lower() in lowered for keyword in keywords)
-
-    def _first_matching(self, items: Iterable[UXSnapshotContext], predicate) -> UXSnapshotContext | None:
-        for item in items:
-            if predicate(item):
-                return item
-        return None
-
-    def _insights_by_url(self, page_insights: dict[str, dict]) -> dict[str, dict]:
-        deduped: dict[str, dict] = {}
-        for insight in page_insights.values():
-            url = str(insight.get("url", "")).strip()
-            if not url:
-                continue
-            current = deduped.get(url)
-            if current is None:
-                deduped[url] = insight
-                continue
-            current_id = str(current.get("state_id", ""))
-            candidate_id = str(insight.get("state_id", ""))
-            if current_id.startswith("observe_") and not candidate_id.startswith("observe_"):
-                deduped[url] = insight
-        return deduped
+def _dedupe_texts(items: Iterable[str], *, limit: int) -> list[str]:
+    results: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = clean_report_text(str(item or ""))
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(text)
+        if len(results) >= limit:
+            break
+    return results

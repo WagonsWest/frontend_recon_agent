@@ -86,20 +86,42 @@ class BrowserController:
         try:
             loc = self.page.locator(selector).first
             await loc.wait_for(state="visible", timeout=timeout)
-            await loc.click()
+            await loc.scroll_into_view_if_needed(timeout=timeout)
+            await loc.click(timeout=timeout)
             await asyncio.sleep(self.config.crawl.wait_after_navigation / 1000)
             return True
         except Exception:
-            return False
+            try:
+                handle = await self.page.locator(selector).first.element_handle()
+                if handle is None:
+                    return False
+                await self.page.evaluate("(el) => el.click()", handle)
+                await asyncio.sleep(self.config.crawl.wait_after_navigation / 1000)
+                return True
+            except Exception:
+                return False
 
     async def click_locator(self, locator: Locator, wait: float | None = None) -> bool:
         """Click a Playwright Locator directly. Returns True on success."""
         try:
-            await locator.click()
+            timeout = self.config.crawl.interaction_timeout
+            try:
+                await locator.scroll_into_view_if_needed(timeout=timeout)
+            except Exception:
+                pass
+            await locator.click(timeout=timeout)
             await asyncio.sleep(wait if wait is not None else self.config.crawl.wait_after_navigation / 1000)
             return True
         except Exception:
-            return False
+            try:
+                handle = await locator.element_handle()
+                if handle is None:
+                    return False
+                await self.page.evaluate("(el) => el.click()", handle)
+                await asyncio.sleep(wait if wait is not None else self.config.crawl.wait_after_navigation / 1000)
+                return True
+            except Exception:
+                return False
 
     async def go_back(self) -> bool:
         """Browser back. Returns True on success."""
@@ -133,13 +155,22 @@ class BrowserController:
         await self.press_escape()
 
     async def get_url(self) -> str:
-        return self.page.url
+        try:
+            return self.page.url
+        except Exception:
+            return ""
 
     async def get_title(self) -> str:
-        return await self.page.title()
+        try:
+            return await self.page.title()
+        except Exception:
+            return ""
 
     async def get_html(self) -> str:
-        return await self.page.content()
+        try:
+            return await self.page.content()
+        except Exception:
+            return ""
 
     async def capture_screenshot(self, label: str, context: str = "nav", full_page: bool = True) -> str:
         """Take full-page screenshot. Returns path."""
@@ -151,8 +182,11 @@ class BrowserController:
             await self.page.screenshot(path=str(path), full_page=full_page)
         except Exception:
             if not full_page:
-                raise
-            await self.page.screenshot(path=str(path), full_page=False)
+                return ""
+            try:
+                await self.page.screenshot(path=str(path), full_page=False)
+            except Exception:
+                return ""
         return str(path)
 
     async def capture_viewport_screenshot(self, label: str, context: str = "vision") -> str:
@@ -161,7 +195,10 @@ class BrowserController:
         safe_label = re.sub(r'[^\w\-\u4e00-\u9fff]', '_', label)[:40]
         name = f"{self._capture_counter:03d}_{safe_label}_{context}.png"
         path = self._project_root / self.config.output.screenshots_dir / name
-        await self.page.screenshot(path=str(path), full_page=False)
+        try:
+            await self.page.screenshot(path=str(path), full_page=False)
+        except Exception:
+            return ""
         return str(path)
 
     async def save_html(self, label: str, context: str = "nav") -> str:
@@ -176,9 +213,11 @@ class BrowserController:
             pass
         return str(path)
 
-    async def evaluate(self, script: str, default: Any = None) -> Any:
+    async def evaluate(self, script: str, *args: Any, default: Any = None) -> Any:
         """Run JS in page context with error handling."""
         try:
+            if args:
+                return await self.page.evaluate(script, *args)
             return await self.page.evaluate(script)
         except Exception:
             return default

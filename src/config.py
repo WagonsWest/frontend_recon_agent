@@ -10,7 +10,6 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 
 from src.config_layering import (
-    GENERAL_HIGH_VALUE_PATH_HINTS,
     GENERIC_ACTION_BUTTON_SELECTORS,
     GENERIC_ADD_BUTTON_SELECTORS,
     GENERIC_EXPAND_SELECTORS,
@@ -126,18 +125,10 @@ class ExplorationConfig(BaseModel):
     ])
     nav_selectors: list[str] = Field(default_factory=lambda: list(GENERIC_NAV_SELECTORS))
     max_route_candidates_per_page: int = 40
-    high_value_path_hints: list[str] = Field(default_factory=lambda: list(GENERAL_HIGH_VALUE_PATH_HINTS))
-    auth_risk_path_hints: list[str] = Field(default_factory=lambda: [
-        "login", "log-in", "signin", "sign-in", "signup", "sign-up",
-        "register", "auth", "oauth", "account",
-    ])
-    interactive_risk_path_hints: list[str] = Field(default_factory=lambda: [
-        "playground", "studio", "chat", "generate", "prompt", "try",
-    ])
-    low_value_path_hints: list[str] = Field(default_factory=lambda: [
-        "privacy", "terms", "legal", "cookie", "cookies", "mailto:",
-        "x.com", "twitter.com", "linkedin.com", "discord.gg", "youtube.com",
-    ])
+    high_value_path_hints: list[str] = Field(default_factory=list)
+    auth_risk_path_hints: list[str] = Field(default_factory=list)
+    interactive_risk_path_hints: list[str] = Field(default_factory=list)
+    low_value_path_hints: list[str] = Field(default_factory=list)
     submenu_expand_selectors: list[str] = Field(default_factory=lambda: list(GENERIC_SUBMENU_EXPAND_SELECTORS))
     hover_menu_trigger_selectors: list[str] = Field(default_factory=lambda: [
         "nav a[href]",
@@ -216,16 +207,6 @@ class VisionConfig(BaseModel):
 
 
 class SynthesisConfig(BaseModel):
-    enabled: bool = False
-    provider: str = "openai"
-    model: str = "gpt-4.1-mini"
-    api_base_url: str = "https://api.openai.com/v1"
-    api_key_env: str = "OPENAI_API_KEY"
-    timeout_ms: int = 20000
-    artifact_filename_json: str = "competitive_analysis_llm.json"
-    artifact_filename_md: str = "competitive_analysis.md"
-    structured_report_filename_md: str = "competitive_analysis_structured.md"
-    readable_report_filename_md: str = "competitive_analysis_readable.md"
     ux_report_filename_md: str = "ux_report.md"
 
 
@@ -238,7 +219,7 @@ class OutputConfig(BaseModel):
 
 class LayeringConfig(BaseModel):
     selector_preset: str = "general_web"
-    heuristic_preset: str = "competitive_analysis"
+    heuristic_preset: str = "none"
     site_patterns_enabled: bool = True
     site_patterns_dir: str = "config/site_patterns"
 
@@ -403,7 +384,6 @@ def apply_run_profile(config: AppConfig, profile_name: str | None) -> str:
         config.task.reobserve_on_state_change = False
         config.task.use_vision_on_state_change = False
         config.vision.enabled = False
-        config.synthesis.enabled = False
         return selected
 
     if selected == "demo":
@@ -411,7 +391,6 @@ def apply_run_profile(config: AppConfig, profile_name: str | None) -> str:
         config.browser.slow_mo = min(config.browser.slow_mo, 100)
         config.crawl.wait_after_navigation = min(config.crawl.wait_after_navigation, 1200)
         config.crawl.wait_for_spa = min(config.crawl.wait_for_spa, 1200)
-        config.synthesis.enabled = False
         return selected
 
     if selected == "full":

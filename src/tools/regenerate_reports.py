@@ -1,4 +1,4 @@
-"""Regenerate competitive-analysis reports from existing artifacts."""
+"""Regenerate UX reports and supporting runtime artifacts from existing outputs."""
 
 from __future__ import annotations
 
@@ -8,8 +8,12 @@ from pathlib import Path
 import click
 
 from src.agent.state import AgentState, ExplorationTarget, StateSnapshot, TargetType, VisitStatus
-from src.analysis.competitive_report import CompetitiveReportGenerator
-from src.analysis.readable_report import ReadableCompetitiveReportGenerator
+from src.analysis.runtime_artifacts import (
+    build_operation_trace,
+    build_site_hierarchy,
+    render_operation_trace_markdown,
+    render_site_hierarchy_markdown,
+)
 from src.analysis.ux_report import UserExperienceReportGenerator
 from src.config import load_config
 
@@ -27,6 +31,17 @@ def _load_jsonl(path: Path) -> dict[str, dict]:
             continue
         row = json.loads(line)
         rows[str(row.get("state_id", ""))] = row
+    return rows
+
+
+def _load_jsonl_rows(path: Path) -> list[dict]:
+    rows: list[dict] = []
+    if not path.exists():
+        return rows
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rows.append(json.loads(line))
     return rows
 
 
@@ -107,7 +122,7 @@ def _load_per_state_dir(path: Path, suffix: str = ".json") -> dict[str, dict]:
 @click.option("--artifacts-dir", default=None, help="Override artifacts directory")
 @click.option("--reports-dir", default=None, help="Override reports directory")
 def main(config_path: str | None, artifacts_dir: str | None, reports_dir: str | None) -> None:
-    """Regenerate competitive-analysis reports from existing output artifacts."""
+    """Regenerate UX reports and supporting runtime artifacts from existing output artifacts."""
     config = load_config(config_path)
     project_root = Path(__file__).parent.parent.parent
     artifacts_root = project_root / (artifacts_dir or config.output.artifacts_dir)
@@ -115,54 +130,47 @@ def main(config_path: str | None, artifacts_dir: str | None, reports_dir: str | 
     reports_root.mkdir(parents=True, exist_ok=True)
 
     state = _rebuild_state(artifacts_root)
-    analysis_results = _load_per_state_dir(artifacts_root / "analysis")
     page_insights = _load_per_state_dir(artifacts_root / config.vision.page_insights_dir)
     extraction_results = _load_jsonl(artifacts_root / "dataset.jsonl")
+    run_log_entries = _load_jsonl_rows(artifacts_root / "run_log.jsonl")
+    coverage_data = _load_json(artifacts_root / "coverage.json") if (artifacts_root / "coverage.json").exists() else {}
 
-    generator = CompetitiveReportGenerator()
-    readable_generator = ReadableCompetitiveReportGenerator()
+    operation_trace = build_operation_trace(run_log_entries)
+    (artifacts_root / "operation_trace.json").write_text(
+        json.dumps(operation_trace, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (reports_root / "operation_trace.md").write_text(
+        render_operation_trace_markdown(operation_trace),
+        encoding="utf-8",
+    )
+
+    site_hierarchy = build_site_hierarchy(state)
+    (artifacts_root / "site_hierarchy.json").write_text(
+        json.dumps(site_hierarchy, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (reports_root / "site_hierarchy.md").write_text(
+        render_site_hierarchy_markdown(site_hierarchy),
+        encoding="utf-8",
+    )
+
     ux_generator = UserExperienceReportGenerator()
-    competitive = generator.generate(
-        state,
-        analysis_results=analysis_results,
-        page_insights=page_insights,
-        extraction_results=extraction_results,
-    )
-
-    (artifacts_root / "competitive_analysis.json").write_text(
-        json.dumps(competitive.model_dump(), indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (reports_root / config.synthesis.structured_report_filename_md).write_text(
-        generator.generate_markdown(competitive),
-        encoding="utf-8",
-    )
-    (reports_root / config.synthesis.artifact_filename_md).write_text(
-        generator.generate_markdown(competitive),
-        encoding="utf-8",
-    )
-    (reports_root / config.synthesis.readable_report_filename_md).write_text(
-        readable_generator.generate(
-            state,
-            competitive,
-            page_insights,
-            extraction_results,
-            reports_root,
-        ),
-        encoding="utf-8",
-    )
     (reports_root / config.synthesis.ux_report_filename_md).write_text(
         ux_generator.generate(
             state,
-            competitive,
             page_insights,
             extraction_results,
             reports_root,
+            run_log_entries=run_log_entries,
+            coverage_data=coverage_data,
+            operation_trace=operation_trace,
+            site_hierarchy=site_hierarchy,
         ),
         encoding="utf-8",
     )
 
-    click.echo(f"Regenerated reports in {reports_root}")
+    click.echo(f"Regenerated UX report and runtime artifacts in {reports_root}")
 
 
 if __name__ == "__main__":

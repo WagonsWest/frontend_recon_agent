@@ -344,4 +344,4 @@ class ReportGenerator:
 - **dataset.jsonl**: per-state structured extraction results
 - **dataset_summary.json**: extraction aggregate statistics
 - **extraction_failures.json**: empty/failed extraction cases
-- **competitive_analysis_readable.md**: stakeholder-facing competitive analysis"""
+- **ux_report.md**: reviewer-style UX report grounded in runtime artifacts"""

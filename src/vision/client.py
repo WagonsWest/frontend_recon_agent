@@ -14,8 +14,13 @@ from urllib.request import Request, urlopen
 from PIL import Image
 
 from src.config import VisionConfig
-from src.vision.prompts import build_vision_system_prompt, build_vision_user_prompt
-from src.vision.types import DOMSummary, VisionResult
+from src.vision.prompts import (
+    build_candidate_ranking_system_prompt,
+    build_candidate_ranking_user_prompt,
+    build_vision_system_prompt,
+    build_vision_user_prompt,
+)
+from src.vision.types import CandidateRankingResult, DOMSummary, VisionResult
 
 
 class VisionClient:
@@ -48,6 +53,44 @@ class VisionClient:
                 )
         except Exception as e:
             return VisionResult(notes=f"vision_error: {e}")
+
+    async def rank_candidates(
+        self,
+        *,
+        kind: str,
+        goal: str,
+        url: str,
+        page_type: str,
+        dom_summary: DOMSummary,
+        interaction_hints: list[dict] | list | None,
+        candidates: list[dict],
+    ) -> CandidateRankingResult:
+        """Rank visible candidates for the next exploration step."""
+        if not candidates:
+            return CandidateRankingResult()
+        if self.config.provider.lower() != "openai":
+            return self._default_candidate_ranking(len(candidates), f"unsupported vision provider: {self.config.provider}")
+
+        api_key = self._resolve_api_key()
+        if not api_key:
+            return self._default_candidate_ranking(len(candidates), f"missing api key in {self.config.api_key_env} or VISION_API_KEY")
+
+        semaphore = self._get_request_semaphore()
+        try:
+            async with semaphore:
+                return await asyncio.to_thread(
+                    self._request_openai_candidate_ranking,
+                    kind,
+                    goal,
+                    url,
+                    page_type,
+                    dom_summary,
+                    interaction_hints or [],
+                    candidates,
+                    api_key,
+                )
+        except Exception as e:
+            return self._default_candidate_ranking(len(candidates), f"candidate_ranking_error: {e}")
 
     def _get_request_semaphore(self) -> asyncio.Semaphore:
         limit = max(1, int(self.config.max_concurrent_requests))
@@ -114,6 +157,68 @@ class VisionClient:
             return VisionResult.model_validate(normalized)
         except Exception as e:
             return VisionResult(notes=f"vision_parse_error: {e}")
+
+    def _request_openai_candidate_ranking(
+        self,
+        kind: str,
+        goal: str,
+        url: str,
+        page_type: str,
+        dom_summary: DOMSummary,
+        interaction_hints: list[dict] | list,
+        candidates: list[dict],
+        api_key: str,
+    ) -> CandidateRankingResult:
+        """Call an OpenAI-compatible endpoint to rank next-step candidates."""
+        payload = {
+            "model": self.config.model,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": build_candidate_ranking_system_prompt(kind)},
+                {
+                    "role": "user",
+                    "content": build_candidate_ranking_user_prompt(
+                        kind=kind,
+                        goal=goal,
+                        url=url,
+                        page_type=page_type,
+                        dom_summary=dom_summary,
+                        interaction_hints=interaction_hints,
+                        candidates=candidates,
+                    ),
+                },
+            ],
+        }
+
+        endpoint = self._resolve_base_url().rstrip("/") + "/chat/completions"
+        request = Request(
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        try:
+            with urlopen(request, timeout=self.config.timeout_ms / 1000) as response:
+                body = response.read().decode("utf-8")
+        except HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"http {e.code}: {error_body}") from e
+        except URLError as e:
+            raise RuntimeError(f"network error: {e}") from e
+
+        raw = json.loads(body)
+        content = raw["choices"][0]["message"]["content"]
+        parsed = self._parse_content(content)
+        normalized = self._normalize_candidate_ranking(parsed, len(candidates))
+
+        try:
+            return CandidateRankingResult.model_validate(normalized)
+        except Exception as e:
+            return self._default_candidate_ranking(len(candidates), f"candidate_ranking_parse_error: {e}")
 
     def _resolve_base_url(self) -> str:
         """Resolve base URL from env override or config."""
@@ -337,6 +442,79 @@ class VisionClient:
         if value is None:
             return ""
         return str(value)
+
+    def _normalize_candidate_ranking(self, parsed: dict, candidate_count: int) -> dict:
+        notes = self._normalize_notes(parsed.get("notes"))
+        choices: list[dict] = []
+        seen: set[int] = set()
+
+        raw_choices = parsed.get("choices")
+        if isinstance(raw_choices, list):
+            for entry in raw_choices:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    index = int(entry.get("index", -1))
+                except Exception:
+                    continue
+                if index < 0 or index >= candidate_count or index in seen:
+                    continue
+                seen.add(index)
+                choices.append({
+                    "index": index,
+                    "score": self._normalize_candidate_score(entry.get("score"), candidate_count),
+                    "reason": self._normalize_notes(entry.get("reason")),
+                })
+
+        raw_indexes = parsed.get("ranked_indexes")
+        if not choices and isinstance(raw_indexes, list):
+            for position, entry in enumerate(raw_indexes):
+                try:
+                    index = int(entry)
+                except Exception:
+                    continue
+                if index < 0 or index >= candidate_count or index in seen:
+                    continue
+                seen.add(index)
+                choices.append({
+                    "index": index,
+                    "score": float(max(candidate_count - position, 1)),
+                    "reason": "",
+                })
+
+        if not choices:
+            return self._default_candidate_ranking(candidate_count, notes).model_dump()
+
+        for index in range(candidate_count):
+            if index in seen:
+                continue
+            choices.append({
+                "index": index,
+                "score": 0.0,
+                "reason": "",
+            })
+
+        return {"choices": choices, "notes": notes}
+
+    def _normalize_candidate_score(self, value: object, candidate_count: int) -> float:
+        try:
+            score = float(value)
+        except Exception:
+            score = float(candidate_count)
+        return max(0.0, min(100.0, score))
+
+    def _default_candidate_ranking(self, candidate_count: int, notes: str = "") -> CandidateRankingResult:
+        return CandidateRankingResult(
+            choices=[
+                {
+                    "index": index,
+                    "score": float(max(candidate_count - index, 1)),
+                    "reason": "fallback_order",
+                }
+                for index in range(candidate_count)
+            ],
+            notes=notes,
+        )
 
     def _normalize_bbox(self, value: object) -> list[float]:
         if not isinstance(value, list):

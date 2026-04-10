@@ -59,6 +59,17 @@ class VisionResult(BaseModel):
     notes: str = ""
 
 
+class CandidateRankChoice(BaseModel):
+    index: int = 0
+    score: float = 0.0
+    reason: str = ""
+
+
+class CandidateRankingResult(BaseModel):
+    choices: list[CandidateRankChoice] = Field(default_factory=list)
+    notes: str = ""
+
+
 class PageInsight(BaseModel):
     state_id: str
     url: str = ""

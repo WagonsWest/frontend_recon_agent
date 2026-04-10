@@ -64,7 +64,7 @@ async def run_batch(
     console.print(
         "[green]Batch complete[/green] "
         f"({summary['successful_sites']}/{summary['site_count']} successful). "
-        f"Comparison: {summary['comparison_report']}"
+        "See batch_summary.json for per-site UX report paths."
     )
 
 
@@ -92,7 +92,7 @@ async def run_target_urls(
     console.print(
         "[green]Ad-hoc batch complete[/green] "
         f"({summary['successful_sites']}/{summary['site_count']} successful). "
-        f"Comparison: {summary['comparison_report']}"
+        "See batch_summary.json for per-site UX report paths."
     )
 
 

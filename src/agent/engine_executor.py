@@ -67,6 +67,13 @@ class ExecutionRuntime:
     async def execute_page_action_decision(self, decision: ActionDecision) -> StateSnapshot | None:
         current_target = self.engine.state.targets.get(self.engine.state.current_target_id or "")
         if not current_target:
+            self.engine.logger.log(
+                AgentPhase.EXECUTE,
+                "page_action_skipped",
+                decision.label,
+                "failed",
+                "no current target",
+            )
             return None
 
         selector = str(decision.metadata.get("selector", "")).strip()
@@ -76,16 +83,35 @@ class ExecutionRuntime:
 
         try:
             before = await self.engine._capture_runtime_signature()
-            locator = self.engine.controller.page.locator(selector)
-            count = await locator.count()
-            if count <= index:
+            locator = await self._resolve_decision_locator(selector, index, decision.label)
+            if locator is None:
+                self.engine.logger.log(
+                    AgentPhase.EXECUTE,
+                    "page_action_skipped",
+                    decision.label,
+                    "failed",
+                    "decision locator not found",
+                )
                 self.engine._remember_action_outcome(decision, False, "selector_index_out_of_range")
                 return None
-            candidate = locator.nth(index)
-            if not await candidate.is_visible():
+            if not await locator.is_visible():
+                self.engine.logger.log(
+                    AgentPhase.EXECUTE,
+                    "page_action_skipped",
+                    decision.label,
+                    "failed",
+                    "target not visible",
+                )
                 self.engine._remember_action_outcome(decision, False, "target_not_visible")
                 return None
-            if not await self.engine.controller.click_locator(candidate, wait=wait_seconds):
+            if not await self.engine.controller.click_locator(locator, wait=wait_seconds):
+                self.engine.logger.log(
+                    AgentPhase.EXECUTE,
+                    "page_action_skipped",
+                    decision.label,
+                    "failed",
+                    "click failed",
+                )
                 self.engine._remember_action_outcome(decision, False, "click_failed")
                 return None
             after = await self.engine._capture_runtime_signature()
@@ -121,6 +147,38 @@ class ExecutionRuntime:
             )
             self.engine._remember_action_outcome(decision, False, str(e))
             return None
+
+    async def _resolve_decision_locator(self, selector: str, index: int, label: str):
+        locator = self.engine.controller.page.locator(selector)
+        count = await locator.count()
+        if count > index:
+            candidate = locator.nth(index)
+            try:
+                if await candidate.is_visible():
+                    return candidate
+            except Exception:
+                pass
+
+        normalized_label = " ".join(label.split()).strip().lower()
+        if not normalized_label:
+            return None
+
+        for i in range(min(count, 80)):
+            candidate = locator.nth(i)
+            try:
+                if not await candidate.is_visible():
+                    continue
+                text = " ".join(((await candidate.text_content()) or "").split()).strip().lower()
+                aria = ((await candidate.get_attribute("aria-label")) or "").strip().lower()
+                title = ((await candidate.get_attribute("title")) or "").strip().lower()
+                haystack = " ".join(part for part in [text, aria, title] if part)
+                if not haystack:
+                    continue
+                if haystack == normalized_label or normalized_label in haystack or haystack in normalized_label:
+                    return candidate
+            except Exception:
+                continue
+        return None
 
     async def execute_form_decision(self, decision: ActionDecision) -> StateSnapshot | None:
         current_target = self.engine.state.targets.get(self.engine.state.current_target_id or "")
@@ -464,10 +522,11 @@ class ExecutionRuntime:
         self.engine.novelty_scorer.register(html, fingerprint)
         self.engine.state.current_state_id = snapshot.id
 
-        computed_styles = await self.engine.controller.get_computed_styles()
-        analysis = self.engine.analyzer.analyze(html, computed_styles)
-        self.engine._analysis_results[snapshot.id] = analysis
-        self.engine.artifacts.save_analysis(snapshot.id, analysis)
+        if html:
+            computed_styles = await self.engine.controller.get_computed_styles()
+            analysis = self.engine.analyzer.analyze(html, computed_styles)
+            self.engine._analysis_results[snapshot.id] = analysis
+            self.engine.artifacts.save_analysis(snapshot.id, analysis)
         if self.engine.config.task.reobserve_on_state_change:
             await self.engine._reobserve_current_state(
                 state_id=snapshot.id,
@@ -651,6 +710,13 @@ class ExecutionRuntime:
             return snapshot
 
         except Exception as e:
+            self.engine.logger.log(
+                AgentPhase.EXECUTE,
+                "capture_route_failed",
+                target.label,
+                "failed",
+                str(e),
+            )
             console.print(f"[red]  Capture failed: {e}[/red]")
             return None
 
